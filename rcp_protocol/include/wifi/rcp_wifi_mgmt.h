@@ -259,6 +259,7 @@ enum rcp_wifi_evt {
 	RCP_WIFI_VERSION,
 	RCP_WIFI_REG_DOMAIN,
 	RCP_TEST_RESULT,
+	RCP_WIFI_TX_POWER_RESP,
 };
 
 /**
@@ -301,7 +302,7 @@ struct rcp_wifi_evt_ap_sta {
  */
 struct rcp_wifi_evt_scan_result {
 	struct rcp_ssid ssid;                    /**< SSID */
-	uint8_t rssi;                            /**< Signal strength */
+	int8_t rssi;                             /**< Signal strength (dBm) */
 	enum rcp_wifi_band band;                 /**< Band */
 	uint32_t channel;                        /**< Channel */
 	enum rcp_wifi_wpa_ent_type wpa_ent_type; /**< WPA Enterprise type */
@@ -341,6 +342,17 @@ struct rcp_wifi_iface_status {
 struct rcp_wifi_evt_iface_status {
 	uint32_t iface_index;
 	struct rcp_wifi_iface_status status;
+};
+
+/**
+ * @struct rcp_wifi_evt_tx_power
+ * TX power GET response payload (RCP_WIFI_TX_POWER_RESP).
+ */
+struct rcp_wifi_evt_tx_power {
+	uint8_t  reg_power;
+	uint8_t  ctl_power;
+	uint16_t target_power;
+	uint16_t real_power;
 };
 
 typedef void (*rcp_wifi_event_callback)(enum rcp_wifi_evt evt, const void *data);
@@ -524,6 +536,14 @@ enum rcp_wifi_status rcp_wifi_ap_enable(uint32_t if_index, const struct rcp_wifi
 enum rcp_wifi_status rcp_wifi_ap_disable(uint32_t if_index);
 
 /**
+ * Deauthenticate (disconnect) an associated STA in SoftAP mode.
+ * @param if_index - WiFi interface index (AP)
+ * @param mac - 6-byte MAC address of the STA to disconnect
+ * @return RCP WiFi status code
+ */
+enum rcp_wifi_status rcp_wifi_ap_sta_disconnect(uint32_t if_index, const uint8_t *mac);
+
+/**
  * Query L2 interfaces
  * @param net_if_type Interface type filter (RCP_NET_IF_TYPE_UNKNOWN => all)
  * @param index Interface index filter (0 => any)
@@ -550,7 +570,7 @@ enum rcp_wifi_status rcp_wifi_get_iface_status(uint32_t if_index);
  * Set WiFi driver and firmware versions
  * @return RCP WiFi status code
  */
-enum rcp_wifi_status rcp_wifi_get_version();
+enum rcp_wifi_status rcp_wifi_get_version(void);
 
 /**
  * Set WiFi Regulatory Domain.
@@ -561,6 +581,37 @@ enum rcp_wifi_status rcp_wifi_get_version();
 enum rcp_wifi_status rcp_wifi_set_reg_domain(const struct rcp_wifi_reg_domain *settings);
 
 /**
+ * Set RTS threshold.
+ *
+ * Proto carries the full cfg80211 threshold; each chip degrades as needed
+ * (QCC730 maps it onto RTS/CTS on/off).
+ *
+ * @param if_index Interface index
+ * @param rts_threshold RTS threshold in bytes; 0xFFFFFFFF = disabled
+ * @return RCP WiFi status code
+ */
+enum rcp_wifi_status rcp_wifi_set_rts_threshold(uint32_t if_index, uint32_t rts_threshold);
+
+/**
+ * Set TX power.
+ *
+ * @param if_index Interface index
+ * @param txpower TX power in dBm
+ * @param policy TX power policy (chip-specific: 0=SAFE, 1=FREERUN on QCC730)
+ * @return RCP WiFi status code
+ */
+enum rcp_wifi_status rcp_wifi_set_tx_power(uint32_t if_index, uint8_t txpower, uint8_t policy);
+
+/**
+ * Request current TX power. The response arrives asynchronously as a
+ * RCP_WIFI_TX_POWER_RESP event carrying struct rcp_wifi_evt_tx_power.
+ *
+ * @param if_index Interface index
+ * @return RCP WiFi status code
+ */
+enum rcp_wifi_status rcp_wifi_get_tx_power(uint32_t if_index);
+
+/**
  * Request Regulatory Domain info
  *
  * @param if_index Indicates which interface to get reg info
@@ -569,5 +620,25 @@ enum rcp_wifi_status rcp_wifi_set_reg_domain(const struct rcp_wifi_reg_domain *s
 enum rcp_wifi_status rcp_wifi_get_reg_domain(uint32_t if_index);
 
 /** @} end of rcp_wifi_mgmt */
+
+/** Maximum vendor command payload / response size */
+#define RCP_WIFI_VENDOR_CMD_MAX_PAYLOAD 128U
+
+/**
+ * Send a QCC730-specific vendor command and wait for the response.
+ *
+ * Synchronous: blocks until QCC730 returns the result (or timeout).
+ *
+ * @param subcmd_id Vendor subcmd ID (see enum qcc730_vendor_subcmd in
+ *                  <rcp_vendor_cmds.h>)
+ * @param req       Request payload (raw struct bytes); NULL if req_len == 0
+ * @param req_len   Length of request payload (max RCP_WIFI_VENDOR_CMD_MAX_PAYLOAD)
+ * @param resp      Buffer to receive response payload; NULL if resp_len == 0
+ * @param resp_len  Expected response size in bytes
+ * @return RCP_WIFI_OK on success, RCP_WIFI_ERR on failure or timeout
+ */
+enum rcp_wifi_status rcp_wifi_vendor_cmd(uint32_t subcmd_id,
+					 const void *req, size_t req_len,
+					 void *resp, size_t resp_len);
 
 #endif

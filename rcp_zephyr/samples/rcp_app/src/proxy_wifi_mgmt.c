@@ -28,6 +28,8 @@
 
 #include "proxy_wifi_mgmt.h"
 #include "proxy_wifi_data.h"
+#include <qcom_wifi_mgmt.h>
+#include <rcp_vendor_cmds.h>
 
 /* Events supported by the management proxy */
 #define WIFI_MGMT_EVENTS                                                                           \
@@ -61,7 +63,7 @@ static struct net_mgmt_event_callback wifi_mgmt_cb;
 static atomic_t scan_requested = ATOMIC_INIT(0);
 
 static uint32_t iface_ptr_to_index(struct net_if *iface);
-static const char *wifi_mgmt_event_name(uint32_t mgmt_event);
+static const char *wifi_mgmt_event_name(uint64_t mgmt_event);
 
 #define SEND_UPLINK_WARN_INTERVAL_MS 1000U
 
@@ -73,7 +75,7 @@ static void reset_scan_uplink_suppression(void);
 static link_result_t send_uplink_result(ros_wifi_v1_WifiMgmtUplink *uplink);
 
 /* Handle WiFi management events */
-static void wifi_mgmt_evt_handler(struct net_mgmt_event_callback *cb, uint32_t mgmt_event,
+static void wifi_mgmt_evt_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 				  struct net_if *iface);
 static void handle_wifi_connect_event(struct net_mgmt_event_callback *cb, uint32_t iface_index);
 static void handle_wifi_disconnect_event(struct net_mgmt_event_callback *cb, uint32_t iface_index);
@@ -92,9 +94,14 @@ static void handle_disconn_request(void);
 static void handle_connect_request(ros_wifi_v1_WifiConnectRequest *conn_req);
 static void handle_ap_enable_request(ros_wifi_v1_WifiApEnableRequest *ap_req);
 static void handle_ap_disable_request(ros_wifi_v1_WifiApDisableRequest *ap_req);
+static void handle_ap_sta_disconnect_request(ros_wifi_v1_WifiApStaDisconnectRequest *req);
 static void handle_get_l2_interface_request(ros_wifi_v1_RequestInterfaces *get_l2_req);
 static void handle_get_iface_status_request(ros_wifi_v1_GetInterfaceStatusRequest *get_status_req);
 static void handle_get_version(ros_wifi_v1_GetWifiVersionRequest *);
+static void handle_vendor_cmd_request(ros_wifi_v1_VendorCmd *proto);
+static void handle_set_rts_threshold(ros_wifi_v1_SetRtsThresholdRequest *proto);
+static void handle_set_tx_power(ros_wifi_v1_SetTxPowerRequest *proto);
+static void handle_get_tx_power(ros_wifi_v1_GetTxPowerRequest *proto);
 
 /* Encode / decode management requests and events */
 static bool encode_wifi_mgmt_evt(ros_wifi_v1_WifiMgmtUplink *evt, uint8_t *buf, uint16_t buf_size,
@@ -444,10 +451,14 @@ static int conn_req_from_proto(const ros_wifi_v1_WifiConnectRequest *proto,
 
 static void scan_req_from_proto(ros_wifi_v1_WifiScanParams *proto, struct wifi_scan_params *scan)
 {
-	scan->scan_type = proto->scan_type;
-	scan->dwell_time_active = proto->dwell_time_active_ms;
-	scan->dwell_time_passive = proto->dwell_time_passive_ms;
-	scan->bands = proto->bands_bitmap;
+	/* Proto: PASSIVE=0, ACTIVE=1  |  Zephyr: ACTIVE=0, PASSIVE=1 — invert */
+	scan->scan_type = (proto->scan_type == ros_wifi_v1_WifiScanType_WIFI_SCAN_TYPE_ACTIVE)
+			? WIFI_SCAN_TYPE_ACTIVE : WIFI_SCAN_TYPE_PASSIVE;
+	/* QCC730 WiFi driver only supports active scan with default params —
+	 * ignore dwell_time and bands to avoid -EINVAL. */
+	scan->dwell_time_active = 0;
+	scan->dwell_time_passive = 0;
+	scan->bands = 0;
 
 	if (proto->ssids_count == 1) {
 		scan->ssids[0] = proto->ssids[0].bytes;
@@ -669,7 +680,7 @@ static uint32_t iface_ptr_to_index(struct net_if *iface)
 	return PROXY_WIFI_IFACE_STA;
 }
 
-static const char *wifi_mgmt_event_name(uint32_t mgmt_event)
+static const char *wifi_mgmt_event_name(uint64_t mgmt_event)
 {
 	switch (mgmt_event) {
 	case NET_EVENT_WIFI_CONNECT_RESULT:
@@ -823,6 +834,8 @@ static void handle_wifi_scan_result(struct net_mgmt_event_callback *cb, uint32_t
 	}
 
 	const struct wifi_scan_result *result = (const struct wifi_scan_result *)cb->info;
+	LOG_DBG("scan_result: ssid=%.*s rssi=%d ch=%d", result->ssid_length, result->ssid,
+		result->rssi, result->channel);
 	ros_wifi_v1_WifiMgmtUplink uplink = ros_wifi_v1_WifiMgmtUplink_init_zero;
 	ros_wifi_v1_WifiMgmtNotification notif = ros_wifi_v1_WifiMgmtNotification_init_zero;
 	link_result_t res;
@@ -865,10 +878,27 @@ static void handle_wifi_scan_done(struct net_mgmt_event_callback *cb, uint32_t i
 	uplink.payload.notification = notif;
 	uplink.which_payload = ros_wifi_v1_WifiMgmtUplink_notification_tag;
 
-	send_uplink(&uplink);
-	if (dropped_scan_events > 0U) {
-		LOG_DBG("Dropped %u scan notification(s) while uplink was saturated",
+	/* Retry until the ring has a free slot — the host is still consuming
+	 * the burst of scan results.  scan_done is the last event so blocking
+	 * here is safe (no more net_mgmt SCAN_RESULT events will arrive). */
+	link_result_t res;
+	int retries = 0;
+
+	do {
+		res = send_uplink_result(&uplink);
+		if (res != RCP_LNK_SUCCESS) {
+			k_msleep(20);
+			retries++;
+		}
+	} while (res != RCP_LNK_SUCCESS && retries < 50);
+
+	if (res == RCP_LNK_SUCCESS) {
+		LOG_INF("scan_done: uplink sent (retries=%d), suppressed=%u dropped=%u",
+			retries,
+			(unsigned int)atomic_get(&scan_uplink_suppressed),
 			(unsigned int)dropped_scan_events);
+	} else {
+		LOG_WRN("scan_done: failed to send after %d retries, dropping", retries);
 	}
 	reset_scan_uplink_suppression();
 	/* Scan request completed */
@@ -1042,6 +1072,27 @@ static void handle_disconn_request(void)
 	uplink.which_payload = ros_wifi_v1_WifiMgmtUplink_response_tag;
 
 	send_uplink(&uplink);
+}
+
+/* Deauth an associated STA. Fire-and-forget: no response is sent back (the host
+ * .del_station path does not wait), matching qapi_WLAN_AP_Disconnect_Station
+ * which just emits a deauth frame. */
+static void handle_ap_sta_disconnect_request(ros_wifi_v1_WifiApStaDisconnectRequest *proto)
+{
+	struct net_if *sap_iface = net_if_get_wifi_sap();
+
+	if (!sap_iface || proto->sta_mac_address.size != WIFI_MAC_ADDR_LEN) {
+		LOG_WRN("AP STA disconnect: bad iface or mac len=%u",
+			(unsigned)proto->sta_mac_address.size);
+		return;
+	}
+
+	int err = net_mgmt(NET_REQUEST_WIFI_AP_STA_DISCONNECT, sap_iface,
+			   proto->sta_mac_address.bytes, proto->sta_mac_address.size);
+	LOG_INF("AP STA disconnect %02x:%02x:%02x:%02x:%02x:%02x err=%d",
+		proto->sta_mac_address.bytes[0], proto->sta_mac_address.bytes[1],
+		proto->sta_mac_address.bytes[2], proto->sta_mac_address.bytes[3],
+		proto->sta_mac_address.bytes[4], proto->sta_mac_address.bytes[5], err);
 }
 
 static void handle_get_l2_interface_request(ros_wifi_v1_RequestInterfaces *proto)
@@ -1247,6 +1298,81 @@ static void handle_set_reg_domain(ros_wifi_v1_SetRegulatoryDomainRequest *proto)
 	send_uplink(&uplink);
 }
 
+static void handle_set_rts_threshold(ros_wifi_v1_SetRtsThresholdRequest *proto)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+	struct qcom_wifi_set_rts_cts_params p;
+	uint32_t thr = proto->rts_threshold;
+	int err;
+
+	ros_wifi_v1_WifiMgmtUplink uplink = ros_wifi_v1_WifiMgmtUplink_init_zero;
+	ros_wifi_v1_WifiMgmtResponse resp = ros_wifi_v1_WifiMgmtResponse_init_zero;
+
+	/* QCC730 only supports RTS/CTS on/off. Degrade the cfg80211 threshold:
+	 * off (0xFFFFFFFF) or >= dot11RTSThreshold max (2347) means "never RTS"
+	 * => disable; any smaller threshold => enable RTS protection. */
+	p.enable = (thr == 0xFFFFFFFFu || thr >= 2347u) ? 0u : 1u;
+
+	err = iface ? net_mgmt(NET_REQUEST_WIFI_QCOM_SET_RTS_CTS, iface, &p, sizeof(p))
+		    : -ENODEV;
+	LOG_INF("set_rts_threshold: thr=%u -> enable=%u err=%d",
+		(unsigned)thr, (unsigned)p.enable, err);
+
+	resp_set_status(err, &resp, NULL);
+	uplink.payload.response = resp;
+	uplink.which_payload = ros_wifi_v1_WifiMgmtUplink_response_tag;
+	send_uplink(&uplink);
+}
+
+static void handle_set_tx_power(ros_wifi_v1_SetTxPowerRequest *proto)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+	struct qcom_wifi_set_tx_power_params p = {0};
+	int err;
+
+	ros_wifi_v1_WifiMgmtUplink uplink = ros_wifi_v1_WifiMgmtUplink_init_zero;
+	ros_wifi_v1_WifiMgmtResponse resp = ros_wifi_v1_WifiMgmtResponse_init_zero;
+
+	p.txpower = (uint8_t)proto->txpower;
+	p.policy  = (uint8_t)proto->policy;
+	err = iface ? net_mgmt(NET_REQUEST_WIFI_QCOM_SET_TX_POWER, iface, &p, sizeof(p))
+		    : -ENODEV;
+	LOG_INF("set_tx_power: txpower=%u policy=%u err=%d",
+		(unsigned)p.txpower, (unsigned)p.policy, err);
+
+	resp_set_status(err, &resp, NULL);
+	uplink.payload.response = resp;
+	uplink.which_payload = ros_wifi_v1_WifiMgmtUplink_response_tag;
+	send_uplink(&uplink);
+}
+
+static void handle_get_tx_power(ros_wifi_v1_GetTxPowerRequest *proto)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+	struct qcom_wifi_get_tx_power_params p = {0};
+	int err;
+
+	ros_wifi_v1_WifiMgmtUplink uplink = ros_wifi_v1_WifiMgmtUplink_init_zero;
+	ros_wifi_v1_WifiMgmtResponse resp = ros_wifi_v1_WifiMgmtResponse_init_zero;
+
+	ARG_UNUSED(proto);
+
+	err = iface ? net_mgmt(NET_REQUEST_WIFI_QCOM_GET_TX_POWER, iface, &p, sizeof(p))
+		    : -ENODEV;
+
+	resp_set_status(err, &resp, NULL);
+	if (err == 0) {
+		resp.which_payload = ros_wifi_v1_WifiMgmtResponse_tx_power_tag;
+		resp.payload.tx_power.reg_power    = p.reg_power;
+		resp.payload.tx_power.ctl_power    = p.ctl_power;
+		resp.payload.tx_power.target_power = p.target_power;
+		resp.payload.tx_power.real_power   = p.real_power;
+	}
+	uplink.payload.response = resp;
+	uplink.which_payload = ros_wifi_v1_WifiMgmtUplink_response_tag;
+	send_uplink(&uplink);
+}
+
 static void handle_get_reg_domain(ros_wifi_v1_GetRegulatoryDomainRequest *)
 {
 	static struct wifi_reg_domain domain_data = {};
@@ -1351,10 +1477,232 @@ static void handle_get_version(ros_wifi_v1_GetWifiVersionRequest *)
 	send_uplink(&uplink);
 }
 
+static void handle_vendor_cmd_request(ros_wifi_v1_VendorCmd *proto)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+	ros_wifi_v1_WifiMgmtUplink uplink = ros_wifi_v1_WifiMgmtUplink_init_zero;
+	ros_wifi_v1_WifiMgmtResponse resp = ros_wifi_v1_WifiMgmtResponse_init_zero;
+	ros_wifi_v1_VendorCmd vc_resp = ros_wifi_v1_VendorCmd_init_zero;
+	int err = 0;
+
+	LOG_INF("vendor_cmd: subcmd=%u payload_len=%u", (unsigned)proto->subcmd_id,
+		(unsigned)proto->payload.size);
+
+	if (!iface) {
+		err = -ENODEV;
+		goto send_resp;
+	}
+
+	vc_resp.subcmd_id = proto->subcmd_id;
+
+	/* Validate and copy a SET request payload into a driver param struct `_p`.
+	 * Evaluates to 0 on success, -EINVAL if the payload is too short. */
+#define VC_COPY_REQ(_p)                                                                            \
+	(proto->payload.size < sizeof(_p)                                                          \
+		 ? -EINVAL                                                                         \
+		 : (memcpy(&(_p), proto->payload.bytes, sizeof(_p)), 0))
+
+	/* Copy a GET result struct `_p` back as the response payload. */
+#define VC_COPY_RESP(_p)                                                                           \
+	do {                                                                                       \
+		BUILD_ASSERT(sizeof(_p) <= RCP_WIFI_VENDOR_CMD_MAX_PAYLOAD,                         \
+			     "resp exceeds vendor_cmd payload size");                              \
+		memcpy(vc_resp.response_payload.bytes, &(_p), sizeof(_p));                         \
+		vc_resp.response_payload.size = sizeof(_p);                                         \
+	} while (0)
+
+	switch (proto->subcmd_id) {
+	case QCC730_SUBCMD_SET_PHY_MODE: {
+		struct qcom_wifi_set_phy_mode_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_SET_PHY_MODE, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_GET_PHY_MODE: {
+		struct qcom_wifi_get_phy_mode_params p = {0};
+		err = net_mgmt(NET_REQUEST_WIFI_QCOM_GET_PHY_MODE, iface, &p, sizeof(p));
+		if (err == 0) {
+			VC_COPY_RESP(p);
+		}
+		break;
+	}
+	case QCC730_SUBCMD_GET_MAC_ADDRESS: {
+		struct qcom_wifi_get_mac_address_params p = {0};
+		err = net_mgmt(NET_REQUEST_WIFI_QCOM_GET_MAC_ADDRESS, iface, &p, sizeof(p));
+		if (err == 0) {
+			BUILD_ASSERT(sizeof(p.mac) <= RCP_WIFI_VENDOR_CMD_MAX_PAYLOAD,
+				     "MAC exceeds vendor_cmd payload size");
+			memcpy(vc_resp.response_payload.bytes, p.mac, sizeof(p.mac));
+			vc_resp.response_payload.size = sizeof(p.mac);
+		}
+		break;
+	}
+	case QCC730_SUBCMD_GET_BOOT_REASON: {
+		struct qcom_wifi_get_boot_reason_params p = {0};
+		err = net_mgmt(NET_REQUEST_WIFI_QCOM_GET_BOOT_REASON, iface, &p, sizeof(p));
+		if (err == 0) {
+			VC_COPY_RESP(p);
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_RTS_RATE: {
+		struct qcom_wifi_set_rts_rate_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_SET_RTS_RATE, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_GET_RTS_RATE: {
+		struct qcom_wifi_get_rts_rate_params p = {0};
+		err = net_mgmt(NET_REQUEST_WIFI_QCOM_GET_RTS_RATE, iface, &p, sizeof(p));
+		if (err == 0) {
+			VC_COPY_RESP(p);
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_RSP_RATE: {
+		struct qcom_wifi_set_rsp_rate_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_SET_RSP_RATE, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_EDCA_PARAM_CFG: {
+		struct qcom_wifi_set_edca_param_cfg_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_SET_EDCA_PARAM_CFG, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_GET_EDCA_PARAM_CFG: {
+		/* qid is an input selector; the remaining fields are filled on
+		 * return. Seed qid from the request payload when provided. */
+		struct qcom_wifi_get_edca_param_cfg_params p = {0};
+		if (proto->payload.size >= sizeof(p.qid)) {
+			p.qid = proto->payload.bytes[0];
+		}
+		err = net_mgmt(NET_REQUEST_WIFI_QCOM_GET_EDCA_PARAM_CFG, iface, &p, sizeof(p));
+		if (err == 0) {
+			VC_COPY_RESP(p);
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_BA_WIN_TIMING: {
+		struct qcom_wifi_set_ba_win_timing_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_SET_BA_WIN_TIMING, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_GET_BA_WIN_TIMING: {
+		struct qcom_wifi_get_ba_win_timing_params p = {0};
+		err = net_mgmt(NET_REQUEST_WIFI_QCOM_GET_BA_WIN_TIMING, iface, &p, sizeof(p));
+		if (err == 0) {
+			VC_COPY_RESP(p);
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_BA_WIN_SIZE: {
+		struct qcom_wifi_set_ba_win_size_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_SET_BA_WIN_SIZE, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_SLOT_TIME: {
+		struct qcom_wifi_set_slot_time_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_SET_SLOT_TIME, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_GET_SLOT_TIME: {
+		struct qcom_wifi_get_slot_time_params p = {0};
+		err = net_mgmt(NET_REQUEST_WIFI_QCOM_GET_SLOT_TIME, iface, &p, sizeof(p));
+		if (err == 0) {
+			VC_COPY_RESP(p);
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_BMISS_THRESHOLD: {
+		struct qcom_wifi_set_bmiss_threshold_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_SET_BMISS_THRESHOLD, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_GET_BMISS_THRESHOLD: {
+		struct qcom_wifi_get_bmiss_threshold_params p = {0};
+		err = net_mgmt(NET_REQUEST_WIFI_QCOM_GET_BMISS_THRESHOLD, iface, &p, sizeof(p));
+		if (err == 0) {
+			VC_COPY_RESP(p);
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_CTS_TO_SELF: {
+		struct qcom_wifi_set_cts_to_self_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_SET_CTS_TO_SELF, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_UNIT_TEST: {
+		/* SET-only: results are logged on the QCC730 console, not returned. */
+		struct qcom_wifi_unit_test_params p;
+		err = VC_COPY_REQ(p);
+		if (err == 0) {
+			err = net_mgmt(NET_REQUEST_WIFI_QCOM_UNIT_TEST, iface, &p, sizeof(p));
+		}
+		break;
+	}
+	default:
+		LOG_WRN("vendor_cmd: unsupported subcmd=%u", (unsigned)proto->subcmd_id);
+		err = -EOPNOTSUPP;
+		break;
+	}
+
+#undef VC_COPY_REQ
+#undef VC_COPY_RESP
+
+send_resp:
+	resp_set_status(err, &resp, NULL);
+	resp.which_payload = ros_wifi_v1_WifiMgmtResponse_vendor_cmd_resp_tag;
+	resp.payload.vendor_cmd_resp = vc_resp;
+	uplink.which_payload = ros_wifi_v1_WifiMgmtUplink_response_tag;
+	uplink.payload.response = resp;
+	send_uplink(&uplink);
+}
+
 static uint8_t handle_mgmt_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payload_ptr,
 			       rcp_error_info_t *err_info_ptr)
 {
-	ARG_UNUSED(status);
+	if (status == RCP_RX_STS_NACK_MSG) {
+		LOG_WRN("WiFi mgmt: ignoring NACK status=%d", (int)status);
+		return RCP_RX_NO_ACTION;
+	}
+
+	if (status == RCP_RX_STS_ERROR) {
+		/* TSN mismatch: rcp_mux_dispatcher already reset RSN to match the
+		 * received TSN, so the payload is valid — process it to avoid
+		 * dropping the request (scan/connect) that triggered the mismatch. */
+		if (!payload_ptr) {
+			LOG_WRN("WiFi mgmt: ERROR status=%d with no payload, ignoring",
+				(int)status);
+			return RCP_RX_NO_ACTION;
+		}
+		LOG_WRN("WiFi mgmt: processing ERROR status=%d (TSN resync, payload valid)",
+			(int)status);
+	}
 
 	if (!payload_ptr) {
 		LOG_WRN("WiFi management msg has no payload");
@@ -1376,7 +1724,7 @@ static uint8_t handle_mgmt_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payl
 	}
 	*evt = (ros_wifi_v1_WifiMgmtRequest)ros_wifi_v1_WifiMgmtRequest_init_zero;
 
-	LOG_INF("wifi mgmt rx len=%u", (unsigned)payload_ptr->size);
+	LOG_DBG("wifi mgmt rx len=%u", (unsigned)payload_ptr->size);
 	if (!decode_wifi_mgmt_req(evt, payload_ptr->data_ptr, payload_ptr->size)) {
 		LOG_WRN("Failed to decode Wifi management msg");
 		k_free(evt);
@@ -1396,6 +1744,9 @@ static uint8_t handle_mgmt_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payl
 	case ros_wifi_v1_WifiMgmtRequest_ap_disable_tag:
 		handle_ap_disable_request(&evt->payload.ap_disable);
 		break;
+	case ros_wifi_v1_WifiMgmtRequest_ap_sta_disconnect_tag:
+		handle_ap_sta_disconnect_request(&evt->payload.ap_sta_disconnect);
+		break;
 	case ros_wifi_v1_WifiMgmtRequest_get_l2_interfaces_tag:
 		handle_get_l2_interface_request(&evt->payload.get_l2_interfaces);
 		break;
@@ -1408,11 +1759,23 @@ static uint8_t handle_mgmt_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payl
 	case ros_wifi_v1_WifiMgmtRequest_set_reg_domain_tag:
 		handle_set_reg_domain(&evt->payload.set_reg_domain);
 		break;
+	case ros_wifi_v1_WifiMgmtRequest_set_rts_threshold_tag:
+		handle_set_rts_threshold(&evt->payload.set_rts_threshold);
+		break;
+	case ros_wifi_v1_WifiMgmtRequest_set_tx_power_tag:
+		handle_set_tx_power(&evt->payload.set_tx_power);
+		break;
+	case ros_wifi_v1_WifiMgmtRequest_get_tx_power_tag:
+		handle_get_tx_power(&evt->payload.get_tx_power);
+		break;
 	case ros_wifi_v1_WifiMgmtRequest_get_reg_domain_tag:
 		handle_get_reg_domain(&evt->payload.get_reg_domain);
 		break;
 	case ros_wifi_v1_WifiMgmtRequest_get_version_tag:
 		handle_get_version(&evt->payload.get_version);
+		break;
+	case ros_wifi_v1_WifiMgmtRequest_vendor_cmd_tag:
+		handle_vendor_cmd_request(&evt->payload.vendor_cmd);
 		break;
 	default:
 		LOG_WRN("Unsupported WiFi management msg tag=%d", evt->which_payload);
@@ -1423,13 +1786,13 @@ static uint8_t handle_mgmt_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payl
 	return RCP_RX_ACK;
 }
 
-static void wifi_mgmt_evt_handler(struct net_mgmt_event_callback *cb, uint32_t mgmt_event,
+static void wifi_mgmt_evt_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt_event,
 				  struct net_if *iface)
 {
 	uint32_t iface_index = iface_ptr_to_index(iface);
 
-	LOG_DBG("wifi_mgmt_evt: %s(0x%x) iface_ptr=%p iface_index=%u",
-		wifi_mgmt_event_name(mgmt_event), mgmt_event, iface, iface_index);
+	LOG_DBG("wifi_mgmt_evt: %s(0x%llx) iface_ptr=%p iface_index=%u",
+		wifi_mgmt_event_name(mgmt_event), (unsigned long long)mgmt_event, iface, iface_index);
 
 	switch (mgmt_event) {
 	case NET_EVENT_WIFI_CONNECT_RESULT:
@@ -1463,6 +1826,6 @@ static void wifi_mgmt_evt_handler(struct net_mgmt_event_callback *cb, uint32_t m
 		break;
 
 	default:
-		LOG_WRN("Unexpected wifi management event %d", mgmt_event);
+		LOG_WRN("Unexpected wifi management event %lld", (long long)mgmt_event);
 	}
 }

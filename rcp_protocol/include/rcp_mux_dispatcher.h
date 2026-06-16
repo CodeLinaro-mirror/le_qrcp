@@ -25,7 +25,7 @@
 #include "rcp_interface.h"
 
 /** Initialize dispatcher state. */
-void init_dispatcher();
+void init_dispatcher(void);
 
 /** @{ @ingroup rcp_interface */
 /**

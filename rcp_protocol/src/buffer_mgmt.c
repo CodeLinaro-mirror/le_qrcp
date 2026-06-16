@@ -34,12 +34,21 @@ static void release_internal_buffer(rcp_buffer_hdl_t *buffer)
 	if (buffer->in_use) {
 		buffer->in_use = false;
 		buffer->size = 0;
+		/* Restore data_ptr to the buffer's own backing store. decode_rcp_msg
+		 * may advance data_ptr past the RCP header for zero-copy payload
+		 * delivery; without this restore the handle would be permanently
+		 * offset and corrupt the next get_buffer() user. */
+		size_t idx = (size_t)(buffer - buff_hdl);
+		if (idx < RCP_NUM_BUFFERS) {
+			buffer->data_ptr = buffer_mem[idx];
+			buffer->max_size = RCP_BUF_SIZE;
+		}
 		buffers_available++;
 		RCP_LOG_DBG("Release buffer; Free=%d\n", buffers_available);
 	}
 }
 
-static void create_ext_buf_hdls()
+static void create_ext_buf_hdls(void)
 {
 	for (int idx = 0; idx < RCP_NUM_EXT_BUFFERS; idx++) {
 		ext_buff_hdl[idx].type = 0;
@@ -48,7 +57,7 @@ static void create_ext_buf_hdls()
 	}
 }
 
-static void create_rcp_buffers()
+static void create_rcp_buffers(void)
 {
 	buffers_available = 0;
 	start_idx = RCP_NUM_BUFFERS - 1;
@@ -89,7 +98,7 @@ rcp_buffer_hdl_t *get_buffer(uint16_t size)
 {
 	rcp_os_mutex_lock(&buffer_mtx);
 	if (buffers_available < 1) {
-		RCP_LOG_ERR("No Free buff_hdl. All assigned =%d\n", RCP_NUM_BUFFERS);
+		RCP_LOG_DBG("No Free buff_hdl. All assigned =%d\n", RCP_NUM_BUFFERS);
 		rcp_os_mutex_unlock(&buffer_mtx);
 		return NULL;
 	}
@@ -153,6 +162,16 @@ uint16_t read_from_buffer(uint8_t *dest_ptr, rcp_buffer_hdl_t *buffer, uint16_t 
 	uint16_t xfer_size = size > buffer->size ? buffer->size : size;
 	memcpy(dest_ptr, buffer->data_ptr, xfer_size);
 	return xfer_size;
+}
+
+bool has_free_buffer(void)
+{
+	bool result;
+
+	rcp_os_mutex_lock(&buffer_mtx);
+	result = buffers_available > 0;
+	rcp_os_mutex_unlock(&buffer_mtx);
+	return result;
 }
 
 rcp_buffer_hdl_t *give_rcp_buff_ownership(uint8_t type, void *mem_ptr, uint16_t mem_size)

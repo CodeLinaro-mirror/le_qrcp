@@ -21,7 +21,7 @@
 #include <stdint.h>
 #include <rcp_config.h>
 
-#if RCP_OS_ZEPHYR
+#ifdef RCP_OS_ZEPHYR
 #include <zephyr/sys/util.h>
 #else
 #define CONCAT(a,b) (a##b)

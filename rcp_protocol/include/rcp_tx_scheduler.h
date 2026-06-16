@@ -36,7 +36,7 @@ typedef struct rcp_schedule_evt_t {
 } rcp_schedule_evt_t;
 
 /** Initialize TX scheduler queue. */
-void init_tx_queue();
+void init_tx_queue(void);
 
 /**
  * Put a buffer at the end of the TX queue.
@@ -56,20 +56,20 @@ bool schedule_tx(rcp_buffer_hdl_t *msg_buffer, uint8_t stream, bool inc_tsn, boo
 *
 * @return true if empty, otherwise false.
 */
-bool is_tx_empty();
+bool is_tx_empty(void);
 
 /**
  * Get TX event that should be sent next.
  *
  * @return pointer to next TX event or NULL if queue is empty.
  */
-rcp_schedule_evt_t *get_tx_event();
+rcp_schedule_evt_t *get_tx_event(void);
 
 // Look at tx_event data but do not pop from queue
-rcp_schedule_evt_t *view_next_tx_event();
+rcp_schedule_evt_t *view_next_tx_event(void);
 
 // Pop event from queue and free it
-void pop_next();
+void pop_next(void);
 
 /**
  * Release a TX event.

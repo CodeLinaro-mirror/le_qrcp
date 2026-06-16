@@ -94,6 +94,13 @@ uint16_t read_from_buffer(uint8_t *dest_ptr, rcp_buffer_hdl_t *buffer, uint16_t 
  */
 rcp_buffer_hdl_t *wrap_buffer(uint8_t type, void *mem_ptr, uint16_t mem_size);
 
+/**
+ * Check if at least one buffer is available without allocating it.
+ *
+ * @return true if a free buffer exists, false if pool is exhausted
+ */
+bool has_free_buffer(void);
+
 /** @} end of rcp_buffer_mgmt */
 
 #endif // __BUFFER_MGMT_H__

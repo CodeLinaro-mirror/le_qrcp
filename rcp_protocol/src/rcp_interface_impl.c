@@ -219,69 +219,8 @@ link_result_t link_reset(uint8_t stream, rcp_buffer_hdl_t *tx_buffer)
 
 void run_event_loop()
 {
-	rcp_msg_t rx_msg;
-
 	while (true) {
-		/* Wait for either TX from application or RX from bus. */
-		uint8_t events =
-			rcp_events_wait_for_any(RCP_EVENT_TX_DATA | RCP_EVENT_RX_DATA, 1000);
-
-		if ((events & RCP_EVENT_TX_DATA) && !is_tx_empty()) {
-			/* Recheck events. */
-			events = rcp_events_get();
-			if (events & RCP_EVENT_TX_RDY) {
-				rcp_schedule_evt_t *event = view_next_tx_event();
-				if (!event) {
-					continue;
-				}
-				lnk_sts_t *lnk_status = get_stream_status(event->stream);
-				if (!lnk_status) {
-					continue;
-				}
-
-				if (tx_rcp_msg(lnk_status, event->msg_buffer)) {
-					// sent successfully
-					if (event->tsn_inc) {
-						lnk_status->seq_nums.tsn =
-							inc_seq_num(lnk_status->seq_nums.tsn);
-					}
-					if (event->reset_ack_window) {
-						lnk_status->seq_nums.ack_window = 0;
-					}
-				} else {
-					// Retry on next loop
-					if (event->num_retries++ < BUS_TX_RETRIES) {
-						continue;
-					}
-					RCP_LOG_WRN(
-						"Discarding message on stream=%x after %d reties",
-						event->stream, event->num_retries);
-				}
-				// Either sent or max retries
-				pop_next();
-			} else {
-				/* TX not ready: wait briefly for TX_RDY or RX_DATA. */
-				(void)rcp_events_wait_for_any(RCP_EVENT_TX_RDY | RCP_EVENT_RX_DATA,
-							      10);
-			}
-		}
-		/* Recheck events. */
-		events = rcp_events_get();
-
-		if (events & RCP_EVENT_RX_DATA) {
-			// ToDo determine how to handle multiple rx buses
-			enum rcp_bus bus = get_stream_status(1)->bus;
-			if (get_rx_data(&rx_msg, bus)) {
-				lnk_sts_t *lnk_sts_ptr = get_stream_status(rx_msg.stream);
-				if (lnk_sts_ptr) {
-					dispatch_msg(&rx_msg, lnk_sts_ptr);
-				} else {
-					RCP_LOG_WRN("Discarding message on invalid stream=%x",
-						    rx_msg.stream);
-					release_buffer(&rx_msg.payload_ptr);
-				}
-			}
-		}
+		run_event_loop_once();
 	}
 }
 
@@ -292,6 +231,61 @@ link_state_t link_get_state(uint8_t stream)
 		return lnk_sts_ptr->state;
 	} else {
 		return LINK_STATE_FAULT;
+	}
+}
+
+/* Single-iteration event loop step.  Call from a kthread loop that checks
+ * kthread_should_stop() between iterations.  Same logic as run_event_loop()
+ * but returns after one pass instead of looping forever. */
+void run_event_loop_once(void)
+{
+	rcp_msg_t rx_msg;
+	uint8_t events = rcp_events_wait_for_any(
+		RCP_EVENT_TX_DATA | RCP_EVENT_RX_DATA, 1000);
+
+	if ((events & RCP_EVENT_TX_DATA) && !is_tx_empty()) {
+		events = rcp_events_get();
+		if (events & RCP_EVENT_TX_RDY) {
+			rcp_schedule_evt_t *event = view_next_tx_event();
+			if (event) {
+				lnk_sts_t *lnk_status = get_stream_status(event->stream);
+				if (lnk_status) {
+					if (tx_rcp_msg(lnk_status, event->msg_buffer)) {
+						if (event->tsn_inc) {
+							lnk_status->seq_nums.tsn =
+								inc_seq_num(lnk_status->seq_nums.tsn);
+						}
+						if (event->reset_ack_window) {
+							lnk_status->seq_nums.ack_window = 0;
+						}
+						pop_next();
+					} else if (event->num_retries++ >= BUS_TX_RETRIES) {
+						RCP_LOG_DBG(
+							"Discarding message on stream=%x after %d reties",
+							event->stream, event->num_retries);
+						pop_next();
+					}
+					/* On transient failure: don't pop, fall through to RX. */
+				}
+			}
+		} else {
+			(void)rcp_events_wait_for_any(RCP_EVENT_TX_RDY | RCP_EVENT_RX_DATA, 10);
+		}
+	}
+
+	events = rcp_events_get();
+	if (events & RCP_EVENT_RX_DATA) {
+		enum rcp_bus bus = get_stream_status(1)->bus;
+		if (get_rx_data(&rx_msg, bus)) {
+			lnk_sts_t *lnk_sts_ptr = get_stream_status(rx_msg.stream);
+			if (lnk_sts_ptr) {
+				dispatch_msg(&rx_msg, lnk_sts_ptr);
+			} else {
+				RCP_LOG_WRN("Discarding message on invalid stream=%x",
+						rx_msg.stream);
+				release_buffer(&rx_msg.payload_ptr);
+			}
+		}
 	}
 }
 

@@ -40,3 +40,7 @@ ros.wifi.v1.WifiScanResult.bssid                max_size:6
 
 ros.wifi.v1.ApStaConnectedEvent.sta_mac_address   max_size:6
 ros.wifi.v1.ApStaDisconnectedEvent.sta_mac_address max_size:6
+ros.wifi.v1.WifiApStaDisconnectRequest.sta_mac_address max_size:6
+
+ros.wifi.v1.VendorCmd.payload          max_size:128
+ros.wifi.v1.VendorCmd.response_payload max_size:128

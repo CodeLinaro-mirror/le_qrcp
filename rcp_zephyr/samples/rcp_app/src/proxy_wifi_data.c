@@ -19,6 +19,7 @@
 #include "rcp_mux_dispatcher.h"
 #include <rcp_interface.h>
 #include <rcp_interface_impl.h>
+#include <buffer_mgmt.h>
 
 #include "proxy_wifi_data.h"
 
@@ -39,27 +40,68 @@
 
 LOG_MODULE_REGISTER(wifi_data_proxy, CONFIG_QUALCOMM_RCP_APP_LOG_LEVEL);
 
+/* ---- host->wifi TX path selector ----
+ *   0 = BLOCKING: net_context_sendto + per-frame synchronous completion wait
+ *                 (original standard net_context path)
+ *   1 = DIRECT  : bypass socket/net_context/L2, call the WiFi driver's .send
+ *                 (qwifi_drv_send) directly with a locally-built net_pkt.
+ *                 Skips ~182us/frame of net_context/L2 wrapper; reaches the
+ *                 ~21 Mbps QcSPI ceiling on clean air.
+ */
+#define RCP_TX_MODE_BLOCKING  0
+#define RCP_TX_MODE_DIRECT    1
+
+#ifndef RCP_TX_MODE
+#define RCP_TX_MODE RCP_TX_MODE_DIRECT
+#endif
+
+/* ---- wifi->host RX path selector ----
+ *   0 = NETSTACK: driver net_recv_data -> ethernet L2 -> AF_PACKET socket ->
+ *                 wifi_rx_cb -> rx_fifo -> wifi_rx_thread (original path).
+ *   1 = DIRECT  : driver rx cb hands the frame straight to
+ *                 proxy_wifi_data_rx_direct(), which builds the RCP frame and
+ *                 calls link_send() in the Wi-Fi RX thread context. Skips
+ *                 net_pkt alloc (the ~510us pool-starvation stall), the net
+ *                 stack (~190us) and one full-frame copy. Mirror of TX DIRECT.
+ */
+#define RCP_RX_MODE_NETSTACK  0
+#define RCP_RX_MODE_DIRECT    1
+
+#ifndef RCP_RX_MODE
+#define RCP_RX_MODE RCP_RX_MODE_DIRECT
+#endif
+
 static struct net_context *sta_ctx;
 static struct net_context *ap_ctx;
 static K_FIFO_DEFINE(rx_fifo);
 static K_MUTEX_DEFINE(tx_lock);
 static K_MUTEX_DEFINE(ctx_lock);
+#if (RCP_TX_MODE == RCP_TX_MODE_BLOCKING)
 static K_SEM_DEFINE(tx_sem, 0, 1);
 static int tx_status = 0;
+#endif
 
 static void wifi_rx_thread(void *p1, void *p2, void *p3);
 static bool init_ctx(struct net_context **ctx, struct net_if *iface);
 static bool ensure_ctx_bound_locked(uint8_t iface_index);
-static struct net_context *get_ctx_locked(uint8_t iface_index);
 static struct net_if *get_iface_by_index(uint8_t iface_index);
+#if (RCP_TX_MODE == RCP_TX_MODE_BLOCKING)
+static struct net_context *get_ctx_locked(uint8_t iface_index);
 static int get_ifindex_by_iface_index(uint8_t iface_index);
+#endif
 static uint8_t get_iface_index_by_iface(const struct net_if *iface);
 static uint8_t normalize_iface_index(uint8_t iface_index);
 static uint8_t handle_data_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payload_ptr,
 			       rcp_error_info_t *err_info_ptr);
 static void wifi_rx_cb(struct net_context *ctx, struct net_pkt *pkt, union net_ip_header *ip_hdr,
 		       union net_proto_header *proto_hdr, int status, void *user_data);
+#if (RCP_TX_MODE == RCP_TX_MODE_BLOCKING)
 static void wifi_tx_cb(struct net_context *ctx, int status, void *user_data);
+#endif
+#if (RCP_RX_MODE == RCP_RX_MODE_DIRECT)
+/* Called directly (extern) from the wifi driver's rx callback. */
+int proxy_wifi_data_rx_direct(uint8_t iface_idx, const uint8_t *frame, uint16_t len);
+#endif
 
 static struct k_thread wifi_rx_thread_data;
 static k_tid_t wifi_rx_tid;
@@ -107,6 +149,7 @@ static struct net_if *get_iface_by_index(uint8_t iface_index)
 	return get_sta_iface();
 }
 
+#if (RCP_TX_MODE == RCP_TX_MODE_BLOCKING)
 static int get_ifindex_by_iface_index(uint8_t iface_index)
 {
 	struct net_if *iface = get_iface_by_index(iface_index);
@@ -117,6 +160,7 @@ static int get_ifindex_by_iface_index(uint8_t iface_index)
 
 	return net_if_get_by_iface(iface);
 }
+#endif
 
 static uint8_t get_iface_index_by_iface(const struct net_if *iface)
 {
@@ -134,6 +178,7 @@ static uint8_t get_iface_index_by_iface(const struct net_if *iface)
 	return PROXY_WIFI_IFACE_STA;
 }
 
+#if (RCP_TX_MODE == RCP_TX_MODE_BLOCKING)
 static struct net_context *get_ctx_locked(uint8_t iface_index)
 {
 	iface_index = normalize_iface_index(iface_index);
@@ -142,6 +187,7 @@ static struct net_context *get_ctx_locked(uint8_t iface_index)
 	}
 	return sta_ctx;
 }
+#endif
 
 static bool ensure_ctx_bound_locked(uint8_t iface_index)
 {
@@ -301,6 +347,11 @@ bool proxy_wifi_data_init(void)
 
 	register_data_msg_handler(RCP_STREAM_WIFI_DATA, handle_data_msg);
 
+#if (RCP_RX_MODE == RCP_RX_MODE_DIRECT)
+	/* DIRECT: the wifi driver rx cb calls proxy_wifi_data_rx_direct() directly
+	 * (extern); no AF_PACKET net_context, no rx_fifo, no wifi_rx_thread. */
+	return true;
+#else
 	k_mutex_lock(&ctx_lock, K_FOREVER);
 	(void)ensure_ctx_bound_locked(PROXY_WIFI_IFACE_STA);
 	(void)ensure_ctx_bound_locked(PROXY_WIFI_IFACE_AP);
@@ -325,7 +376,9 @@ bool proxy_wifi_data_init(void)
 	}
 
 	k_thread_name_set(wifi_rx_tid, "wifi_rx");
+
 	return true;
+#endif /* RCP_RX_MODE */
 }
 
 static bool init_ctx(struct net_context **ctx, struct net_if *iface)
@@ -368,6 +421,43 @@ static bool init_ctx(struct net_context **ctx, struct net_if *iface)
 	return true;
 }
 
+#if (RCP_TX_MODE == RCP_TX_MODE_DIRECT)
+/* Experiment B: hand the frame straight to the WiFi driver's .send, bypassing
+ * the socket / net_context / ethernet-L2 dispatch path. The driver .send is the
+ * first member (ethernet_api at offset 0) of the device API.
+ *
+ * qwifi_drv_send() copies the frame into its own DPM TX buffer and does NOT
+ * take ownership of the net_pkt (in the normal path the ethernet L2 unrefs it
+ * after .send returns). Since we bypass L2, WE must unref the pkt ourselves —
+ * on every path, success or failure — or the 16-entry TX pool leaks dry after
+ * a few frames (net_pkt_alloc then returns -ENOMEM). */
+static int wifi_tx_direct(struct net_if *iface, const uint8_t *frame, uint16_t len)
+{
+	const struct device *dev = net_if_get_device(iface);
+	const struct ethernet_api *eth = dev ? dev->api : NULL;
+	struct net_pkt *pkt;
+	int ret;
+
+	if (!eth || !eth->send) {
+		return -ENOTSUP;
+	}
+
+	pkt = net_pkt_alloc_with_buffer(iface, len, AF_UNSPEC, 0, K_NO_WAIT);
+	if (!pkt) {
+		return -ENOMEM;
+	}
+
+	if (net_pkt_write(pkt, frame, len) < 0) {
+		net_pkt_unref(pkt);
+		return -EIO;
+	}
+
+	ret = eth->send(dev, pkt);
+	net_pkt_unref(pkt);
+	return ret;
+}
+#endif
+
 /* Called from the RCP dispatcher context. */
 static uint8_t handle_data_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payload_ptr,
 			       rcp_error_info_t *)
@@ -409,6 +499,30 @@ static uint8_t handle_data_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payl
 	RCP_ETH_LOG_TX("MCU TX(host->wifi)", frame_ptr, frame_len);
 
 	k_mutex_lock(&tx_lock, K_FOREVER);
+
+#if (RCP_TX_MODE == RCP_TX_MODE_DIRECT)
+	/* DIRECT: skip socket/net_context/L2 — call the driver .send. */
+	ARG_UNUSED(retries);
+	ARG_UNUSED(ctx);
+	ARG_UNUSED(ifindex);
+	{
+		struct net_if *iface = get_iface_by_index(iface_index);
+
+		if (!iface) {
+			LOG_ERR("TX: iface %u not available", iface_index);
+			k_mutex_unlock(&tx_lock);
+			return RCP_RX_NO_ACTION;
+		}
+		ret = wifi_tx_direct(iface, frame_ptr, frame_len);
+		if (ret < 0) {
+			/* -EAGAIN here is the WiFi HW TX queue being transiently
+			 * full (common when TCP ACKs stream back during high-rate
+			 * RX). Harmless — TCP's cumulative ACK recovers — so log at
+			 * debug level rather than error to avoid noise. */
+			LOG_DBG("wifi_tx_direct failed: %d", ret);
+		}
+	}
+#else /* RCP_TX_MODE_BLOCKING */
 	k_mutex_lock(&ctx_lock, K_FOREVER);
 	(void)ensure_ctx_bound_locked(iface_index);
 	ctx = get_ctx_locked(iface_index);
@@ -429,13 +543,13 @@ static uint8_t handle_data_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payl
 
 	LOG_DBG("WiFi TX over ifindex=%d iface=%u len=%u", ifindex, iface_index, frame_len);
 
-	do {
-		struct sockaddr_ll dst = {
-			.sll_ifindex = ifindex,
-			.sll_family = AF_PACKET,
-			.sll_protocol = htons(ETH_P_ALL),
-		};
+	struct sockaddr_ll dst = {
+		.sll_ifindex = ifindex,
+		.sll_family = AF_PACKET,
+		.sll_protocol = htons(ETH_P_ALL),
+	};
 
+	do {
 		k_sem_reset(&tx_sem);
 		tx_status = 0;
 
@@ -462,6 +576,7 @@ static uint8_t handle_data_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payl
 		LOG_DBG("Wi-Fi TX failed: %d", tx_status);
 		k_sleep(K_MSEC(RCP_TX_ERR_DELAY_MS));
 	} while (retries--);
+#endif /* RCP_TX_MODE_DIRECT */
 
 	k_mutex_unlock(&tx_lock);
 
@@ -484,7 +599,42 @@ static bool link_send_with_retries(rcp_buffer_hdl_t *msg_buffer)
 	return (result == RCP_LNK_SUCCESS);
 }
 
+#if (RCP_RX_MODE == RCP_RX_MODE_DIRECT)
+/* RX DIRECT: called by the WiFi driver's rx callback (nt_wlan thread context)
+ * with the raw Ethernet frame. Build the RCP WiFi-data frame in place and hand
+ * it to link_send. The HAL frees `frame` right after we return, so we must copy
+ * it out here (single copy, replacing net_pkt alloc + net_pkt_write +
+ * net_pkt_read of the net-stack path). */
+int proxy_wifi_data_rx_direct(uint8_t iface_idx, const uint8_t *frame, uint16_t len)
+{
+	rcp_buffer_hdl_t *msg_buffer;
+
+	if ((len == 0U) || ((size_t)len + PROXY_WIFI_DATA_HDR_SIZE > RX_BUF_SIZE)) {
+		return -1;
+	}
+
+	msg_buffer = get_buffer(RX_BUF_SIZE);
+	if (!msg_buffer) {
+		return -1;
+	}
+
+	msg_buffer->data_ptr[0] = PROXY_WIFI_DATA_HDR_VERSION;
+	msg_buffer->data_ptr[1] = normalize_iface_index(iface_idx);
+	memcpy(msg_buffer->data_ptr + PROXY_WIFI_DATA_HDR_SIZE, frame, len);
+	msg_buffer->size = (uint16_t)(len + PROXY_WIFI_DATA_HDR_SIZE);
+
+	RCP_ETH_LOG_RX("MCU RX(wifi->host)", msg_buffer->data_ptr + PROXY_WIFI_DATA_HDR_SIZE, len);
+
+	if (!link_send_with_retries(msg_buffer)) {
+		release_buffer(&msg_buffer);
+		return -1;
+	}
+	return 0;
+}
+#endif /* RCP_RX_MODE_DIRECT */
+
 /* Dedicated thread for WiFi -> host path. */
+__attribute__((unused))
 static void wifi_rx_thread(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
@@ -567,6 +717,7 @@ static void wifi_rx_cb(struct net_context *ctx, struct net_pkt *pkt, union net_i
 	k_fifo_put(&rx_fifo, pkt);
 }
 
+#if (RCP_TX_MODE == RCP_TX_MODE_BLOCKING)
 static void wifi_tx_cb(struct net_context *ctx, int status, void *user_data)
 {
 	ARG_UNUSED(ctx);
@@ -575,3 +726,4 @@ static void wifi_tx_cb(struct net_context *ctx, int status, void *user_data)
 	tx_status = status;
 	k_sem_give(&tx_sem);
 }
+#endif

@@ -205,6 +205,11 @@ enum RequestType {
   REQUEST_TYPE_GET_IFACE_STATUS = 11;
   REQUEST_TYPE_GET_PROTOCOL_VERSION = 12;
   REQUEST_TYPE_GET_INTERFACES = 13; // L2 inventory
+  REQUEST_TYPE_VENDOR_CMD = 14;     // chip-specific vendor command
+  REQUEST_TYPE_AP_STA_DISCONNECT = 15; // deauth an associated STA (AP mode)
+  REQUEST_TYPE_SET_RTS_THRESHOLD = 16;
+  REQUEST_TYPE_SET_TX_POWER = 17;
+  REQUEST_TYPE_GET_TX_POWER = 18;
 }
 
 // -----------------------------------------------------------------------------
@@ -316,12 +321,30 @@ message WifiApDisableRequest {
   uint32 iface_index = 1;
 }
 
+message WifiApStaDisconnectRequest {
+  uint32 iface_index = 1;
+  bytes sta_mac_address = 2;   // MAC of the associated STA to deauth
+}
+
 message GetWifiVersionRequest {}
 message SetPowerSaveConfigRequest { uint32 iface_index = 1; WifiPowerSaveConfig config = 2; }
 message GetPowerSaveConfigRequest { uint32 iface_index = 1; }
 message SetRegulatoryDomainRequest { uint32 iface_index = 1; WifiRegDomain reg_domain = 2; }
 message GetRegulatoryDomainRequest { uint32 iface_index = 1; }
 message GetInterfaceStatusRequest { uint32 iface_index = 1; }
+message SetRtsThresholdRequest { uint32 iface_index = 1; uint32 rts_threshold = 2; } // 0xFFFFFFFF = off
+message SetTxPowerRequest  { uint32 iface_index = 1; uint32 txpower = 2; uint32 policy = 3; }
+message GetTxPowerRequest  { uint32 iface_index = 1; }
+message GetTxPowerResponse { uint32 reg_power = 1; uint32 ctl_power = 2; uint32 target_power = 3; uint32 real_power = 4; }
+
+// Vendor command: subcmd_id identifies the chip-specific operation.
+// Request: populate subcmd_id and payload (raw struct bytes, little-endian).
+// Response: populate response_payload (raw struct bytes from the chip).
+message VendorCmd {
+  uint32 subcmd_id       = 1;  // chip-specific op; subcmd enumeration lives in the target chip's vendor-cmd header
+  bytes  payload         = 2;  // request data (raw binary matching the chip's vendor-cmd struct)
+  bytes  response_payload = 3; // response data (raw binary filled by the chip)
+}
 
 // L2 inventory
 enum NetIfType {
@@ -470,9 +493,18 @@ message WifiMgmtRequest {
     SetRegulatoryDomainRequest set_reg_domain = 18;
     GetRegulatoryDomainRequest get_reg_domain = 19;
     GetInterfaceStatusRequest get_iface_status = 20;
+    SetRtsThresholdRequest set_rts_threshold = 21;
+    SetTxPowerRequest set_tx_power = 22;
+    GetTxPowerRequest get_tx_power = 23;
 
     // L2 inventory
     RequestInterfaces get_l2_interfaces = 30;
+
+    // AP mode: deauth an associated STA
+    WifiApStaDisconnectRequest ap_sta_disconnect = 31;
+
+    // chip-specific vendor command
+    VendorCmd vendor_cmd = 50;
   }
 }
 
@@ -492,12 +524,16 @@ message WifiMgmtResponse {
     GetRegulatoryDomainResponse reg_domain = 11;
     GetInterfaceStatusResponse iface_status = 12;
     GetPowerSaveConfigResponse ps_config = 13;
+    GetTxPowerResponse tx_power = 14;
 
     // L2 inventory
     RequestInterfacesResponse l2_interfaces = 30;
 
     // Protocol version (if requested via op == REQUEST_TYPE_GET_PROTOCOL_VERSION)
     ProtocolVersionResponse proto_version = 40;
+
+    // chip-specific vendor command response
+    VendorCmd vendor_cmd_resp = 50;
   }
 }
 

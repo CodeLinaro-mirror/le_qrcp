@@ -61,7 +61,7 @@ typedef void (*cntrl_msg_handler_t)(uint8_t msg_type, uint8_t subtype,
 typedef void (*key_exchange_done_cb)(bool success);
 
 /** Initialize control link. */
-void init_cntrl_status();
+void init_cntrl_status(void);
 
 /** Handle messages received over control stream.
  *
@@ -105,7 +105,7 @@ void init_mcu_vserial_port_count(uint8_t count);
  *
  * @return true on success, otherwise false
  */
-bool send_capability_request();
+bool send_capability_request(void);
 
 /**  Request a loopback on a specific stream.
  *
@@ -123,7 +123,7 @@ bool send_loopback_request(uint8_t stream);
  *
  * @return true on success, otherwise false
  */
-bool send_loopback_cancel();
+bool send_loopback_cancel(void);
 
 /** Send encryption key exchange request.
  *

@@ -36,6 +36,34 @@ LOG_MODULE_DECLARE(qualcomm_rcp, RCP_LOG_LEVEL);
 #define RCP_LOG_INF(...) LOG_INF(__VA_ARGS__)
 #define RCP_LOG_DBG(...) LOG_DBG(__VA_ARGS__)
 
+#elif defined(RCP_OS_KERNEL) && defined(RCP_LOG)
+
+#include <linux/kernel.h>
+
+#if RCP_LOG_LEVEL >= 4
+#define RCP_LOG_DBG(msg, ...) pr_debug("rcp: " msg, ##__VA_ARGS__)
+#else
+#define RCP_LOG_DBG(...)
+#endif
+
+#if RCP_LOG_LEVEL >= 3
+#define RCP_LOG_INF(msg, ...) pr_info("rcp: " msg, ##__VA_ARGS__)
+#else
+#define RCP_LOG_INF(...)
+#endif
+
+#if RCP_LOG_LEVEL >= 2 && !RCP_LOG_IGNORE_WARNINGS
+#define RCP_LOG_WRN(msg, ...) pr_warn("rcp: " msg, ##__VA_ARGS__)
+#else
+#define RCP_LOG_WRN(...)
+#endif
+
+#if RCP_LOG_LEVEL >= 1 && !RCP_LOG_IGNORE_WARNINGS
+#define RCP_LOG_ERR(msg, ...) pr_err("rcp: " msg, ##__VA_ARGS__)
+#else
+#define RCP_LOG_ERR(...)
+#endif
+
 #elif (defined(RCP_OS_FREERTOS) || defined(RCP_OS_LINUX)) && defined(RCP_LOG)
 
 #include <stdio.h>

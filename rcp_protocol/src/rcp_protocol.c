@@ -24,6 +24,9 @@ static void upd_msg_buff_seq_nums(lnk_sts_t *lnk_sts_ptr, rcp_buffer_hdl_t *buff
 		if (msg_type2fmt(*msg_ptr) == RPC_MSG_FORMAT_DATA ||
 				msg_type2fmt(*msg_ptr) == RPC_MSG_FORMAT_DATA_ENC) {
 			msg_ptr += RCP_POS_SEQ_NUMS;
+			/* Clear seq fields first — retries reuse the same buffer, so
+			 * OR-ing stale bits would corrupt TSN/RSN on the second call. */
+			*msg_ptr &= ~(RCP_MASK_TSN | RCP_MASK_RSN | RCP_MASK_ACK);
 			*msg_ptr |= (lnk_sts_ptr->seq_nums.tsn << RCP_BIT_SHFT_TSN) & RCP_MASK_TSN;
 			*msg_ptr |= (lnk_sts_ptr->seq_nums.rsn << RCP_BIT_SHFT_RSN) & RCP_MASK_RSN;
 			*msg_ptr |= (lnk_sts_ptr->seq_nums.ack_required << RCP_BIT_SHFT_ACK) &
@@ -122,11 +125,13 @@ bool decode_rcp_msg(rcp_msg_ptr_t msg_ptr, rcp_buffer_hdl_t *rx_buffer)
 
 	msg_ptr->payload_ptr = NULL;
 	if (payload_size > 0) {
-		msg_ptr->payload_ptr = get_buffer(payload_size);
-		if (msg_ptr->payload_ptr) {
-			scan_ptr += 2;
+		scan_ptr += 2;
 
-			if (is_msg_encrypted(msg_ptr)) {
+		if (is_msg_encrypted(msg_ptr)) {
+			/* Encrypted: decrypt into a fresh buffer (cannot decrypt in
+			 * place), then release the raw rx_buffer. */
+			msg_ptr->payload_ptr = get_buffer(payload_size);
+			if (msg_ptr->payload_ptr) {
 				RCP_LOG_DBG("Received encrypted message");
 #if RCP_ENCRYPTION
 				uint8_t *buf = msg_ptr->payload_ptr->data_ptr;
@@ -136,13 +141,26 @@ bool decode_rcp_msg(rcp_msg_ptr_t msg_ptr, rcp_buffer_hdl_t *rx_buffer)
 #else
 				RCP_LOG_ERR("Encryption not supported to decrypt message");
 #endif
-			} else {
-				write_to_buffer(msg_ptr->payload_ptr, scan_ptr, payload_size);
 			}
-
+			release_buffer(&rx_buffer);
+		} else {
+			/* Zero-copy: hand the rx_buffer itself up as the payload,
+			 * advancing data_ptr past the RCP header instead of allocating a
+			 * second buffer and memcpy'ing ~1.5 KB (the dominant per-frame
+			 * cost on this CPU). release_internal_buffer() restores data_ptr
+			 * to the backing store when the payload buffer is freed. */
+			rx_buffer->data_ptr = scan_ptr;
+			rx_buffer->size = payload_size;
+			/* Shrink max_size so data_ptr + max_size stays within the
+			 * backing store (data_ptr advanced by RCP_HDR_SIZE). Restored
+			 * on release. */
+			rx_buffer->max_size = payload_size;
+			msg_ptr->payload_ptr = rx_buffer;
 		}
+	} else {
+		/* No payload: nothing to hand up, free the raw buffer. */
+		release_buffer(&rx_buffer);
 	}
-	release_buffer(&rx_buffer);
 
 	return true;
 }

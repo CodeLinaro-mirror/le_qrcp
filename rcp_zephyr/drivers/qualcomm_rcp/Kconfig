@@ -49,4 +49,13 @@ config RCP_BUS_SPI_RX_QUEUE_SIZE
 
 endif # QUALCOMM_RCP_BUS_SPI_SLAVE
 
+menuconfig QCC730_RCP_BUS_QCSPI
+	bool "QCC730 QcSPI RCP bus driver"
+	default y
+	depends on DT_HAS_QCOM_RCP_BUS_QCSPI_ENABLED
+	depends on GPIO
+
+if QCC730_RCP_BUS_QCSPI
+endif # QCC730_RCP_BUS_QCSPI
+
 endif # QUALCOMM_RCP_BUS_DRIVERS

@@ -46,7 +46,7 @@ static uint8_t handle_loopback_data_msg(enum rcp_rx_status status, rcp_buffer_hd
 	return RCP_RX_RESPONSE;
 }
 
-static void reset_loopback_state()
+static void reset_loopback_state(void)
 {
 	loopback.stream = RCP_STREAM_NOT_DEFINED;
 	loopback.active = false;
@@ -161,7 +161,7 @@ void init_mcu_vserial_port_count(uint8_t count)
 	mcu_vserial_port_count = count;
 }
 
-bool send_capability_ind()
+bool send_capability_ind(void)
 {
 	rcp_buffer_hdl_t *buff_ptr = get_buffer(RCP_MCU_CAP_PAYLOAD_SIZE);
 	if (buff_ptr) {

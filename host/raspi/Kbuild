@@ -1,0 +1,49 @@
+RCP_PROTO_SRC := ../../rcp_protocol/src
+RCP_PROTO_INC := ../../rcp_protocol/include
+
+RCP_NANOPB_INC := ../../rcp_protocol/ext/nanopb
+
+ccflags-y += -I$(src)/stub_includes
+ccflags-y += -I$(src)/$(RCP_PROTO_INC)
+ccflags-y += -I$(src)/$(RCP_PROTO_SRC)
+ccflags-y += -I$(src)/$(RCP_NANOPB_INC)
+ccflags-y += -I$(src)
+ccflags-y += -DRCP_OS_KERNEL
+ccflags-y += -DRCP_LOG
+ccflags-y += -DRCP_LOG_IGNORE_WARNINGS=0
+ccflags-y += -DRCP_LOG_LEVEL=3
+# Auto-include stdio/stdlib stubs so upstream code can use printf/malloc
+# even without explicit #include (rcp_wifi_mgmt.c uses printf without including stdio.h)
+ccflags-y += -include $(src)/stub_includes/stdio.h
+ccflags-y += -include $(src)/stub_includes/stdlib.h
+# Suppress upstream-code warnings that are not errors in our context
+ccflags-y += -Wno-missing-prototypes
+ccflags-y += -Wno-missing-declarations
+ccflags-y += -Wno-implicit-fallthrough
+
+obj-m := rcp_wifi.o
+
+rcp_wifi-objs := \
+	rcp_main.o \
+	rcp_caps_qcc730.o \
+	rcp_bench.o \
+	rcp_cfg80211_ops.o \
+	rcp_wifi_event.o \
+	rcp_netdev_ops.o \
+	rcp_vendor_cmds.o \
+	rcp_bus_spi_master_linux_qcc730.o \
+	rcp_os_kernel.o \
+	$(RCP_PROTO_SRC)/rcp_interface_impl.o \
+	$(RCP_PROTO_SRC)/rcp_mux_dispatcher.o \
+	$(RCP_PROTO_SRC)/rcp_protocol.o \
+	$(RCP_PROTO_SRC)/rcp_tx_scheduler.o \
+	$(RCP_PROTO_SRC)/rcp_bus.o \
+	$(RCP_PROTO_SRC)/rcp_event.o \
+	$(RCP_PROTO_SRC)/rcp_error_codes.o \
+	$(RCP_PROTO_SRC)/rcp_cntrl_msgs.o \
+	$(RCP_PROTO_SRC)/wifi/rcp_wifi_mgmt.o \
+	$(RCP_PROTO_SRC)/wifi/wifi_mgmt.pb.o \
+	$(RCP_PROTO_SRC)/buffer_mgmt.o \
+	$(RCP_NANOPB_INC)/pb_common.o \
+	$(RCP_NANOPB_INC)/pb_decode.o \
+	$(RCP_NANOPB_INC)/pb_encode.o

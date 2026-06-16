@@ -25,7 +25,14 @@
  * Event loop processes the RCP TX queue and sends messages over appropriate
  * bus as well and passes RX traffic from bus to appropriate stream handlers.
  */
-void run_event_loop();
+void run_event_loop(void);
+
+/**
+ * Single-iteration event loop step.
+ * Same processing as run_event_loop() but returns after one pass.
+ * Use from a kthread that checks kthread_should_stop() between calls.
+ */
+void run_event_loop_once(void);
 
 #ifdef CONFIG_INCLUDE_TRANSPORT_TESTS
 link_result_t link_send_seq_error(uint8_t stream, bool tsn_error, bool rsn_error,

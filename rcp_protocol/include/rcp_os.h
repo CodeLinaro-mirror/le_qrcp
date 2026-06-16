@@ -23,10 +23,14 @@
 
 #ifdef RCP_OS_ZEPHYR
 #include <zephyr/kernel.h>
-#elif RCP_OS_FREERTOS
+#elif defined(RCP_OS_FREERTOS)
 #include <FreeRTOS.h>
 #include <semphr.h>
-#elif RCP_OS_LINUX
+#elif defined(RCP_OS_KERNEL)
+#include <linux/semaphore.h>
+#include <linux/mutex.h>
+#include <linux/atomic.h>
+#elif defined(RCP_OS_LINUX)
 #include <semaphore.h>
 #include <pthread.h>
 #endif
@@ -36,9 +40,11 @@ typedef struct {
 #ifdef RCP_OS_ZEPHYR
 	/** OS-specific semaphore. */
 	struct k_sem _sem;
-#elif RCP_OS_FREERTOS
+#elif defined(RCP_OS_FREERTOS)
 	SemaphoreHandle_t _sem;
-#elif RCP_OS_LINUX
+#elif defined(RCP_OS_KERNEL)
+	struct semaphore _sem;
+#elif defined(RCP_OS_LINUX)
 	sem_t _sem;
 #endif
 } rcp_sem_t;
@@ -47,15 +53,19 @@ typedef struct {
 #ifdef RCP_OS_ZEPHYR
 	/** OS-specific mutex. */
 	struct k_mutex _mtx;
-#elif RCP_OS_FREERTOS
+#elif defined(RCP_OS_FREERTOS)
 	SemaphoreHandle_t _mtx;
-#elif RCP_OS_LINUX
+#elif defined(RCP_OS_KERNEL)
+	struct mutex _mtx;
+#elif defined(RCP_OS_LINUX)
 	pthread_mutex_t _mtx;
 #endif
 } rcp_mutex_t;
 
 typedef struct {
 #ifdef RCP_OS_ZEPHYR
+	atomic_t _val;
+#elif defined(RCP_OS_KERNEL)
 	atomic_t _val;
 #else
 	uint8_t _val;

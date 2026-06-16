@@ -27,6 +27,7 @@
 #include <wifi/rcp_wifi_mgmt.h>
 #include <rcp_interface.h>
 #include <rcp_config.h>
+#include <rcp_os.h>
 
 static rcp_wifi_event_callback evt_callback[RCP_WIFI_MAX_CB_CNT];
 uint8_t num_cb;
@@ -45,6 +46,16 @@ uint8_t num_cb;
 static ros_wifi_v1_WifiMgmtRequest tx_mgmt_req;
 static ros_wifi_v1_WifiMgmtUplink rx_uplink_msg;
 
+/* Vendor command synchronization (used by rcp_wifi_vendor_cmd). */
+#define VENDOR_CMD_TIMEOUT_MS 5000U
+static rcp_sem_t vendor_cmd_sem;
+static bool vendor_sem_initialized;
+static struct {
+	uint8_t data[RCP_WIFI_VENDOR_CMD_MAX_PAYLOAD];
+	uint32_t len;
+	bool success;
+} vendor_resp_storage;
+
 static enum rcp_wifi_status encode_and_send(ros_wifi_v1_WifiMgmtRequest *mgmt_req);
 /* Encode disconnection request protobuf */
 static bool encode_disconn_req(uint8_t *buf, uint16_t buf_len, uint16_t *enc_len);
@@ -59,6 +70,8 @@ static void build_get_iface_status_req(uint32_t if_index, ros_wifi_v1_WifiMgmtRe
 static void build_wifi_ap_enable_req(uint32_t if_index, const struct rcp_wifi_ap_config *cfg,
 				     ros_wifi_v1_WifiMgmtRequest *mgmt_req);
 static void build_wifi_ap_disable_req(uint32_t if_index, ros_wifi_v1_WifiMgmtRequest *mgmt_req);
+static void build_wifi_ap_sta_disconnect_req(uint32_t if_index, const uint8_t *mac,
+					     ros_wifi_v1_WifiMgmtRequest *mgmt_req);
 
 static enum rcp_wifi_status encode_and_send(ros_wifi_v1_WifiMgmtRequest *mgmt_req)
 
@@ -215,6 +228,21 @@ static void build_wifi_ap_disable_req(uint32_t if_index, ros_wifi_v1_WifiMgmtReq
 	mgmt_req->txn_id = 0;
 }
 
+static void build_wifi_ap_sta_disconnect_req(uint32_t if_index, const uint8_t *mac,
+					     ros_wifi_v1_WifiMgmtRequest *mgmt_req)
+{
+	ros_wifi_v1_WifiApStaDisconnectRequest req =
+		ros_wifi_v1_WifiApStaDisconnectRequest_init_default;
+
+	req.iface_index = if_index;
+	req.sta_mac_address.size = WIFI_BSSID_SIZE;
+	memcpy(req.sta_mac_address.bytes, mac, WIFI_BSSID_SIZE);
+	mgmt_req->payload.ap_sta_disconnect = req;
+	mgmt_req->which_payload = ros_wifi_v1_WifiMgmtRequest_ap_sta_disconnect_tag;
+	mgmt_req->op = ros_wifi_v1_RequestType_REQUEST_TYPE_AP_STA_DISCONNECT;
+	mgmt_req->txn_id = 0;
+}
+
 /* Call all registered callbacks */
 static void call_evt_callbacks(enum rcp_wifi_evt evt, const void *data);
 
@@ -237,6 +265,10 @@ enum rcp_wifi_status rcp_wifi_init(void)
 	if (reg_res != RCP_LNK_SUCCESS) {
 		RCP_LOG_ERR("Failed to register WiFi mgmt RX handler (%d)", reg_res);
 		return RCP_WIFI_ERR;
+	}
+
+	if (!vendor_sem_initialized) {
+		vendor_sem_initialized = rcp_os_sem_init(&vendor_cmd_sem, 0, 1);
 	}
 
 	wifi_initialized = true;
@@ -331,6 +363,13 @@ enum rcp_wifi_status rcp_wifi_ap_disable(uint32_t if_index)
 	return encode_and_send(&mgmt_req);
 }
 
+enum rcp_wifi_status rcp_wifi_ap_sta_disconnect(uint32_t if_index, const uint8_t *mac)
+{
+	ros_wifi_v1_WifiMgmtRequest mgmt_req = ros_wifi_v1_WifiMgmtRequest_init_default;
+	build_wifi_ap_sta_disconnect_req(if_index, mac, &mgmt_req);
+	return encode_and_send(&mgmt_req);
+}
+
 enum rcp_wifi_status rcp_wifi_get_l2_interfaces(enum rcp_netif_type net_if_type, uint32_t index)
 
 {
@@ -365,6 +404,39 @@ enum rcp_wifi_status rcp_wifi_set_reg_domain(const struct rcp_wifi_reg_domain *r
 	return encode_and_send(&mgmt_req);
 }
 
+enum rcp_wifi_status rcp_wifi_set_rts_threshold(uint32_t if_index, uint32_t rts_threshold)
+{
+	ros_wifi_v1_WifiMgmtRequest mgmt_req = ros_wifi_v1_WifiMgmtRequest_init_default;
+
+	mgmt_req.which_payload = ros_wifi_v1_WifiMgmtRequest_set_rts_threshold_tag;
+	mgmt_req.payload.set_rts_threshold.iface_index = if_index;
+	mgmt_req.payload.set_rts_threshold.rts_threshold = rts_threshold;
+
+	return encode_and_send(&mgmt_req);
+}
+
+enum rcp_wifi_status rcp_wifi_set_tx_power(uint32_t if_index, uint8_t txpower, uint8_t policy)
+{
+	ros_wifi_v1_WifiMgmtRequest mgmt_req = ros_wifi_v1_WifiMgmtRequest_init_default;
+
+	mgmt_req.which_payload = ros_wifi_v1_WifiMgmtRequest_set_tx_power_tag;
+	mgmt_req.payload.set_tx_power.iface_index = if_index;
+	mgmt_req.payload.set_tx_power.txpower = txpower;
+	mgmt_req.payload.set_tx_power.policy  = policy;
+
+	return encode_and_send(&mgmt_req);
+}
+
+enum rcp_wifi_status rcp_wifi_get_tx_power(uint32_t if_index)
+{
+	ros_wifi_v1_WifiMgmtRequest mgmt_req = ros_wifi_v1_WifiMgmtRequest_init_default;
+
+	mgmt_req.which_payload = ros_wifi_v1_WifiMgmtRequest_get_tx_power_tag;
+	mgmt_req.payload.get_tx_power.iface_index = if_index;
+
+	return encode_and_send(&mgmt_req);
+}
+
 enum rcp_wifi_status rcp_wifi_get_reg_domain(uint32_t if_index)
 {
 	ros_wifi_v1_WifiMgmtRequest mgmt_req = {};
@@ -381,6 +453,64 @@ enum rcp_wifi_status rcp_wifi_get_version()
 	mgmt_req.op = ros_wifi_v1_RequestType_REQUEST_TYPE_GET_WIFI_VERSION;
 	mgmt_req.which_payload = ros_wifi_v1_WifiMgmtRequest_get_version_tag;
 	return encode_and_send(&mgmt_req);
+}
+
+enum rcp_wifi_status rcp_wifi_vendor_cmd(uint32_t subcmd_id,
+					 const void *req, size_t req_len,
+					 void *resp, size_t resp_len)
+{
+	if (!vendor_sem_initialized) {
+		RCP_LOG_ERR("vendor_cmd: not initialized");
+		return RCP_WIFI_ERR;
+	}
+
+	if (req_len > RCP_WIFI_VENDOR_CMD_MAX_PAYLOAD ||
+	    resp_len > RCP_WIFI_VENDOR_CMD_MAX_PAYLOAD) {
+		RCP_LOG_ERR("vendor_cmd: payload too large req=%u resp=%u",
+			    (unsigned)req_len, (unsigned)resp_len);
+		return RCP_WIFI_ERR;
+	}
+
+	/* Drain any leftover token from a prior incomplete command. */
+	rcp_os_sem_take(&vendor_cmd_sem, 0);
+
+	ros_wifi_v1_WifiMgmtRequest *mgmt_req = &tx_mgmt_req;
+	*mgmt_req = (ros_wifi_v1_WifiMgmtRequest)ros_wifi_v1_WifiMgmtRequest_init_default;
+
+	mgmt_req->op = ros_wifi_v1_RequestType_REQUEST_TYPE_VENDOR_CMD;
+	mgmt_req->which_payload = ros_wifi_v1_WifiMgmtRequest_vendor_cmd_tag;
+	mgmt_req->payload.vendor_cmd.subcmd_id = subcmd_id;
+
+	if (req && req_len > 0) {
+		memcpy(mgmt_req->payload.vendor_cmd.payload.bytes, req, req_len);
+		mgmt_req->payload.vendor_cmd.payload.size = (pb_size_t)req_len;
+	}
+
+	enum rcp_wifi_status ret = encode_and_send(mgmt_req);
+	if (ret != RCP_WIFI_OK) {
+		return ret;
+	}
+
+	/* Block until QCC730 responds (or timeout). */
+	if (!rcp_os_sem_take(&vendor_cmd_sem, VENDOR_CMD_TIMEOUT_MS)) {
+		RCP_LOG_ERR("vendor_cmd: timeout (subcmd=%u)", (unsigned)subcmd_id);
+		return RCP_WIFI_ERR;
+	}
+
+	if (!vendor_resp_storage.success) {
+		RCP_LOG_ERR("vendor_cmd: rejected by QCC730 (subcmd=%u)",
+			    (unsigned)subcmd_id);
+		return RCP_WIFI_ERR;
+	}
+
+	if (resp && resp_len > 0) {
+		size_t copy_len = (vendor_resp_storage.len < resp_len)
+					  ? vendor_resp_storage.len
+					  : resp_len;
+		memcpy(resp, vendor_resp_storage.data, copy_len);
+	}
+
+	return RCP_WIFI_OK;
 }
 
 static bool encode_conn_req(struct rcp_wifi_conn_req *req, uint8_t *buf, uint16_t buf_len,
@@ -684,10 +814,13 @@ static void handle_wifi_notification(ros_wifi_v1_WifiMgmtNotification *notif)
 	case ros_wifi_v1_WifiEvent_scan_result_event_tag: {
 		struct rcp_wifi_evt_scan_result result;
 		get_scan_result(&result, &notif->event.event_data.scan_result_event);
+		RCP_LOG_INF("Linux: scan_result ch=%d ssid=%.*s", result.channel,
+			    (int)result.ssid.size, result.ssid.bytes);
 		call_evt_callbacks(RCP_WIFI_SCAN_RESULT, &result);
 		break;
 	}
 	case ros_wifi_v1_WifiEvent_scan_done_event_tag: {
+		RCP_LOG_INF("Linux: scan_done received");
 		call_evt_callbacks(RCP_WIFI_SCAN_DONE, NULL);
 		break;
 	}
@@ -839,6 +972,35 @@ static void handle_wifi_response(ros_wifi_v1_WifiMgmtResponse *resp)
 		break;
 	}
 
+	case ros_wifi_v1_WifiMgmtResponse_vendor_cmd_resp_tag: {
+		const ros_wifi_v1_VendorCmd *vc = &resp->payload.vendor_cmd_resp;
+		uint32_t len = vc->response_payload.size;
+
+		if (len > RCP_WIFI_VENDOR_CMD_MAX_PAYLOAD) {
+			len = RCP_WIFI_VENDOR_CMD_MAX_PAYLOAD;
+		}
+		memcpy(vendor_resp_storage.data, vc->response_payload.bytes, len);
+		vendor_resp_storage.len = len;
+		/* QCC730 reports per-command success via the response status; a
+		 * rejected request (e.g. TX power above regulatory limit) must not
+		 * look like success to the caller. */
+		vendor_resp_storage.success = resp->has_status ? resp->status.success : true;
+		rcp_os_sem_give(&vendor_cmd_sem);
+		break;
+	}
+
+	case ros_wifi_v1_WifiMgmtResponse_tx_power_tag: {
+		struct rcp_wifi_evt_tx_power evt = {0};
+		const ros_wifi_v1_GetTxPowerResponse *tp = &resp->payload.tx_power;
+
+		evt.reg_power    = (uint8_t)tp->reg_power;
+		evt.ctl_power    = (uint8_t)tp->ctl_power;
+		evt.target_power = (uint16_t)tp->target_power;
+		evt.real_power   = (uint16_t)tp->real_power;
+		call_evt_callbacks(RCP_WIFI_TX_POWER_RESP, &evt);
+		break;
+	}
+
 	default:
 		RCP_LOG_DBG("Unsupported tag = %d", resp->which_payload);
 	}
@@ -846,7 +1008,10 @@ static void handle_wifi_response(ros_wifi_v1_WifiMgmtResponse *resp)
 static uint8_t handle_rcp_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payload_ptr,
 			      rcp_error_info_t *err_info_ptr)
 {
-	(void)status;
+	if (status == RCP_RX_STS_NACK_MSG || status == RCP_RX_STS_ERROR) {
+		RCP_LOG_WRN("WiFi mgmt: ignoring non-data status=%d", (int)status);
+		return RCP_RX_NO_ACTION;
+	}
 
 	if (payload_ptr == NULL) {
 		RCP_LOG_INF("Discarding empty RCP message");

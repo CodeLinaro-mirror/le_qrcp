@@ -1,0 +1,17 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+description: |
+  Qualcomm RCP bus QcSPI (QCC730 memory-mapped SPI slave)
+
+compatible: "qcom,rcp-bus-qcspi"
+
+include: [base.yaml]
+
+properties:
+  spi:
+    type: phandle
+    required: true
+  irq-gpios:
+    type: phandle-array
+    required: true

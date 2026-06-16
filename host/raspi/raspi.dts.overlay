@@ -1,0 +1,67 @@
+/*
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
+ */
+
+/*
+ * Raspberry Pi DTS overlay for QCC730 RCP via SPI0 + IRQ GPIO21
+ *
+ * Connections:
+ *   SPI0_MOSI (GPIO10) -> QCC730 GPIO2 (MOSI)
+ *   SPI0_MISO (GPIO9)  <- QCC730 GPIO3 (MISO)
+ *   SPI0_CLK  (GPIO11) -> QCC730 GPIO0 (CLK)
+ *   SPI0_CE0  (GPIO8)  -> QCC730 GPIO1 (CS, active low)
+ *   GPIO21             <- QCC730 GPIO8 (IRQ, active high, rising edge)
+ *   GPIO20             -> QCC730 reset (active low: low=reset, high=run)
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* Disable default spidev on CS0 - replaced by QCC730 device */
+			spidev@0 {
+				status = "disabled";
+			};
+
+			qcc730_rcp: qcc730@0 {
+				compatible = "qcom,qcc730-rcp";
+				reg = <0>;
+				spi-max-frequency = <25000000>;   /* 25 MHz (250MHz/10) */				interrupt-parent = <&gpio>;
+				interrupts = <21 1>;  /* GPIO21, rising edge */
+				interrupt-names = "interrupt";
+				/* GPIO20 -> QCC730 reset, active low (low=reset asserted).
+				 * flag 1 == GPIO_ACTIVE_LOW (literal, avoids the
+				 * dt-bindings include so a plain `dtc` build works). */
+				reset-gpios = <&gpio 20 1>;
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&gpio>;
+		__overlay__ {
+			qcc730_irq_pins: qcc730_irq_pins {
+				brcm,pins = <21>;
+				brcm,function = <0>;  /* input */
+				brcm,pull = <0>;      /* no pull */
+			};
+
+			qcc730_reset_pins: qcc730_reset_pins {
+				brcm,pins = <20>;
+				brcm,function = <1>;  /* output */
+				brcm,pull = <0>;      /* no pull */
+			};
+		};
+	};
+};
