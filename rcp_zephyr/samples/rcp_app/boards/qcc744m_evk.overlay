@@ -1,0 +1,66 @@
+               /*
+ * Copyright (c) 2025 Qualcomm Technologies, Inc. and/or its subsidiaries
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+&pinctrl {
+    status = "okay";
+    sdio_default: sdio_default {
+        group1 {
+			pinmux = <GPIO14_SDIO_DAT0>,
+				<GPIO15_SDIO_DAT1>,
+				<GPIO10_SDIO_DAT2>,
+				<GPIO11_SDIO_DAT3>,
+                <GPIO12_SDIO_CMD>,
+                <GPIO13_SDIO_CLK>;
+            bias-pull-up;
+            drive-strength = <1>;
+            input-enable;
+            input-schmitt-enable;
+        };
+    };
+};
+
+&sdio {
+	status = "okay";
+    pinctrl-0 = <&sdio_default>;
+    pinctrl-names = "default";
+    #address-cells = <1>;
+    #size-cells = <0>;
+    download-size-max = <2048>;
+    rcp: rcp@0 {
+        status = "okay";
+        compatible = "qcom,rcp-bus-sdio-slave";
+        reg = <0>;
+    };
+};
+
+/ {
+
+	chosen {
+		zephyr,ot-uart = &rcp_virt_uart1;
+	};
+
+	aliases {
+		rcp-vserial0 = &rcp_virt_uart0;
+		rcp-vserial1 = &rcp_virt_uart1;
+	};
+
+	rcp_virt_uart0: rcp_virt_uart0 {
+		compatible = "qcom,rcp-vserial-uart";
+		port = <0>;
+		status = "okay";
+	};
+
+	rcp_virt_uart1: rcp_virt_uart1 {
+		compatible = "qcom,rcp-vserial-uart";
+		port = <1>;
+		status = "okay";
+	};
+};
+
+
+&uart1 {
+	status = "okay";
+};

@@ -1,0 +1,42 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+// options for NanoPB
+
+ros.wifi.v1.WifiRegDomain.channel_info          max_count:50
+ros.wifi.v1.WifiRegDomain.country_code          max_size:2
+
+ros.wifi.v1.WifiConnectRequest.ssid             max_size:32
+ros.wifi.v1.WifiConnectRequest.psk              max_size:64
+ros.wifi.v1.WifiConnectRequest.sae_password     max_size:128
+ros.wifi.v1.WifiConnectRequest.bssid            max_size:6
+ros.wifi.v1.WifiConnectRequest.anonymous_id     max_size: 128
+ros.wifi.v1.WifiConnectRequest.key_password     max_size: 64
+ros.wifi.v1.WifiConnectRequest.key2_password    max_size: 64
+ros.wifi.v1.WifiConnectRequest.eap_identity     max_size: 128
+ros.wifi.v1.WifiConnectRequest.eap_password     max_size: 64
+ros.wifi.v1.WifiConnectRequest.eap_identities   max_size: 128 max_count: 1
+ros.wifi.v1.WifiConnectRequest.eap_passwords    max_size: 64  max_count: 1
+
+ros.wifi.v1.WifiScanParams.ssids                max_size:32 max_count:8
+ros.wifi.v1.WifiScanParams.band_chan            max_count: 10
+
+ros.wifi.v1.WifiApEnableParams.ssid             max_size:32
+ros.wifi.v1.WifiApEnableParams.psk              max_size:64
+
+ros.wifi.v1.WifiStatusResponse.error_message    max_size:50
+
+ros.wifi.v1.WifiVersion.firmware_version        max_size:20
+ros.wifi.v1.WifiVersion.driver_version          max_size:20
+
+ros.wifi.v1.WifiInterfaceStatus.ssid            max_size:32
+ros.wifi.v1.WifiInterfaceStatus.bssid           max_size:6
+
+ros.wifi.v1.NetworkInterface.mac_address        max_size:6
+ros.wifi.v1.RequestInterfacesResponse.net_ifs   max_count:5
+
+ros.wifi.v1.WifiScanResult.ssid                 max_size:32
+ros.wifi.v1.WifiScanResult.bssid                max_size:6
+
+ros.wifi.v1.ApStaConnectedEvent.sta_mac_address   max_size:6
+ros.wifi.v1.ApStaDisconnectedEvent.sta_mac_address max_size:6

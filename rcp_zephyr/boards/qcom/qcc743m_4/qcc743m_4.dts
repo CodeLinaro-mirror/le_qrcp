@@ -1,0 +1,165 @@
+/*
+ * Copyright (c) 2025 Qualcomm Technologies, Inc. and/or its subsidiaries
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include <qcom/qcc74x/qcc74x.dtsi>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include "qcc743m_4-pinctrl.dtsi"
+
+/ {
+	model = "QCC743M-4 Module";
+	compatible = "qcom,qcc743";
+
+	chosen {
+		zephyr,flash = &flash0;
+		zephyr,sram = &sram0;
+		zephyr,nocache = &nocache;
+		zephyr,hbnram = &hbnram;
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		zephyr,entropy = &trng0;
+		zephyr,bt-hci = &bt_hci;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,clock-controller = &clock0;
+		zephyr,flash-controller = &flashctrl;
+		zephyr,ieee802154 = &ieee802154;
+	};
+
+	aliases {
+		rtc = &rtc0;
+		watchdog0 = &wdt0;
+	};
+};
+
+/ {
+	coredump_device0: coredump-device0 {
+		compatible = "zephyr,coredump";
+		coredump-type = "COREDUMP_TYPE_MEMCPY";
+		status = "okay";
+	};
+};
+
+&flashctrl {
+	flash0: flash@A0000000 {
+		compatible = "soc-nv-flash";
+		reg = <0xA0000000 DT_SIZE_K(4096 - 8)>;
+		write-block-size = <1>;
+		erase-block-size = <DT_SIZE_K(4)>;
+		status = "okay";
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			boot_partition: partition@0 {
+				label = "mcuboot";
+				reg = <0x0 DT_SIZE_K(64)>;
+			};
+
+			slot0_partition: partition@10000 {
+				label = "image-0";
+				reg = <0x10000 DT_SIZE_K(1344)>;
+			};
+
+			slot1_partition: partition@1F0000 {
+				label = "image-1";
+				reg = <0x1F0000 DT_SIZE_K(1344)>;
+			};
+
+			storage_partition: partition@3C0000 {
+				label = "storage";
+				reg = <0x3C0000 DT_SIZE_K(128)>;
+			};
+
+			scratch_partition: partition@3E0000 {
+				label = "image-scratch";
+				reg = <0x3E0000 DT_SIZE_K(64)>;
+			};
+
+			coredump_partition: partition@3F0000 {
+				label = "coredump-partition";
+				reg = <0x3F0000 DT_SIZE_K(4)>;
+			};
+		};
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-1 = <&uart0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&trng0 {
+	status = "okay";
+};
+
+&timer0 {
+	status = "disabled";
+	clock-source = <3>;
+	clock-div = <79>;
+	counter-mode = <1>;
+	preload-id = <0>;
+	comp0-val = <1000000>;
+	comp1-val = <10000000>;
+	comp2-val = <0xFFFFFFFF>;
+	preload-val = <0>;
+};
+
+&timer1 {
+	status = "disabled";
+	clock-source = <3>;
+	clock-div = <79>;
+	counter-mode = <1>;
+	preload-id = <0>;
+	comp0-val = <1000000>;
+	comp1-val = <10000000>;
+	comp2-val = <0xFFFFFFFF>;
+	preload-val = <0>;
+};
+
+&wdt0 {
+	status = "disabled";
+	clock-source = <1>;
+	clock-div = <31>;
+};
+
+&comparator0 {
+	vio_sel = <33>;
+};
+
+&comparator1 {
+	vio_sel = <33>;
+};
+
+&wifi {
+	compatible = "qcom,wifi";
+	status = "okay";
+};
+
+/ {
+	wifi_sta: wifi_sta {
+		compatible = "qcom,opal-wifi";
+		status = "okay";
+	};
+	wifi_ap: wifi_ap {
+		compatible = "qcom,opal-wifi";
+		status = "okay";
+	};
+
+	ieee802154: ieee802154 {
+		compatible = "qcom,opal-ieee802154";
+		status = "disabled";
+	};
+};
+
+&bt_hci {
+	status = "okay";
+};

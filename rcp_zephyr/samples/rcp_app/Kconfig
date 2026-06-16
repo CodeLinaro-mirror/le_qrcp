@@ -1,0 +1,73 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+mainmenu "Qualcomm RCP application"
+
+module = QUALCOMM_RCP_APP
+module-str = qualcomm_rcp_app
+source "subsys/logging/Kconfig.template.log_config"
+
+source "Kconfig.zephyr"
+
+config USE_DUMMY_WIFI_MGMT_DATA
+    bool "Use dummy WiFi management data for unsupported requests"
+    default n
+    help
+      Respond to WiFi management requests that are unsupported by the driver
+      with dummy data for testing purposes.
+
+config INCLUDE_TRANSPORT_TESTS
+    bool "Include RCP transport tests for validation"
+    default n
+    help
+    Include transport validation tests
+
+config QUALCOMM_RCP_APP_VSERIAL_LOG
+	bool "Mirror Zephyr logs to RCP VSerial stream"
+	default n
+	depends on LOG
+	depends on QUALCOMM_RCP_VSERIAL_UART
+	select LOG_OUTPUT
+	help
+	  Enable a minimal logging backend that forwards runtime LOG_* output
+	  over RCP virtual serial. VSerial port 0 is reserved for log forwarding.
+
+config QUALCOMM_RCP_APP_VSERIAL_LOG_PORT
+	int "VSerial port used for log forwarding"
+	range 0 3
+	default 0
+	depends on QUALCOMM_RCP_APP_VSERIAL_LOG
+	help
+	  RCP virtual serial port index used by the log backend.
+
+config QUALCOMM_RCP_APP_VSERIAL_LOG_LINE_MAX
+	int "Maximum formatted log chunk size"
+	range 64 1024
+	default 256
+	depends on QUALCOMM_RCP_APP_VSERIAL_LOG
+	help
+	  Internal line buffer size used while formatting log messages for VSerial.
+
+config QUALCOMM_RCP_APP_VSERIAL_LOG_DROP_WHEN_BUSY
+	bool "Drop VSerial log output when link is congested"
+	default y
+	depends on QUALCOMM_RCP_APP_VSERIAL_LOG
+	help
+	  Use best-effort non-blocking log forwarding and drop log payload when
+	  VSerial TX buffers are not immediately available.
+
+config QUALCOMM_RCP_APP_VSERIAL_LOG_DUPLICATE_TO_PHYS_UART
+	bool "Duplicate VSerial logs to physical UART console"
+	default n
+	depends on QUALCOMM_RCP_APP_VSERIAL_LOG
+	help
+	  If enabled, data emitted to the VSerial log backend is also mirrored to
+	  the Zephyr console UART. Keep this disabled during initial bring-up.
+
+config QUALCOMM_RCP_INIT_PRIORITY
+	int "Init priority of RCP initialization"
+	default 90
+	help
+	  Initialization priority of rcp_init() function. Can be used to ensure
+	  correct order of initialization of RCP resources. RCP is initialized
+	  at POST_KERNEL level.

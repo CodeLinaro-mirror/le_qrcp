@@ -1,0 +1,27 @@
+/*
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause-Clear
+ */
+
+&rcp_sdio {
+    status = "disabled";
+};
+
+&spi0 {
+    status = "okay";
+    pinctrl-0 = <&spi_default>;
+    pinctrl-names = "default";
+    #address-cells = <1>;
+    #size-cells = <0>;
+    /* Use GPIO1 (Pin_2) for chip RDY signal. */
+    rdy-gpios = <&gpio0 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+
+    rcp_spi: rcp@0 {
+        status = "okay";
+        compatible = "qcom,rcp-bus-spi-slave";
+        reg = <0>;
+        /* Use GPIO3 (Pin_4) for IRQ. */
+        irq-gpios = <&gpio0 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+    };
+};

@@ -1,0 +1,48 @@
+From c90dfdbedbdb43c6db26cb5b962fe5d9658403c3 Mon Sep 17 00:00:00 2001
+From: Marek Metelski <marek.metelski@unikie.com>
+Date: Mon, 4 May 2026 17:37:21 +0200
+Subject: [PATCH] drivers: spi: Invalidate cached buffers instead of non-cache
+ alias
+
+Use the original, cached pointer for invalidation.
+---
+ drivers/spi/spi_opal.c | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/spi/spi_opal.c b/drivers/spi/spi_opal.c
+index 5a6ffa1b4e..a2ea9228f8 100644
+--- a/drivers/spi/spi_opal.c
++++ b/drivers/spi/spi_opal.c
+@@ -1036,7 +1036,7 @@ static int spi_opal_ensure_discard_buf(struct spi_opal_dma_data *dma_data, size_
+ 
+ 	dma_data->discard_dma_buf =
+ 		qc7xx_get_no_cache_addr((const void *)(uintptr_t)dma_data->discard_buf);
+-	qc7xx_l1c_dcache_invalidate_range((void *)(uintptr_t)dma_data->discard_dma_buf, need);
++	qc7xx_l1c_dcache_invalidate_range(dma_data->discard_buf, need);
+ 	dma_data->discard_buf_size = need;
+ 	return 0;
+ }
+@@ -1905,8 +1905,7 @@ static int spi_opal_transceive_sync(const struct device *dev, const struct spi_c
+ 			}
+ 			data->dma[TX].dma_buffer = qc7xx_get_no_cache_addr(
+ 				(const void *)(uintptr_t)data->dma[TX].aligned_buf);
+-			qc7xx_l1c_dcache_invalidate_range(
+-				(void *)(uintptr_t)data->dma[TX].dma_buffer, bounce_len);
++			qc7xx_l1c_dcache_invalidate_range(data->dma[TX].aligned_buf, bounce_len);
+ 			memset((void *)data->dma[TX].dma_buffer, 0, bounce_len);
+ 
+ 			/* Copy all TX segments into the bounce buffer contiguously */
+@@ -1938,8 +1937,8 @@ static int spi_opal_transceive_sync(const struct device *dev, const struct spi_c
+ 			}
+ 			data->dma[RX].dma_buffer = qc7xx_get_no_cache_addr(
+ 				(const void *)(uintptr_t)data->dma[RX].aligned_buf);
+-			qc7xx_l1c_dcache_invalidate_range(
+-				(void *)(uintptr_t)data->dma[RX].dma_buffer, total_rx_nonnull);
++			qc7xx_l1c_dcache_invalidate_range(data->dma[RX].aligned_buf,
++							total_rx_nonnull);
+ 			memset((void *)data->dma[RX].dma_buffer, 0, total_rx_nonnull);
+ 		}
+ 
+-- 
+2.43.0
+

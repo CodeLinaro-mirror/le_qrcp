@@ -1,0 +1,9 @@
+# Copyright (c) 2025 Qualcomm Technologies, Inc. and/or its subsidiaries
+# SPDX-License-Identifier: Apache-2.0
+
+board:
+  name: qcc743m_4
+  full_name: QCC743M-4 Module
+  vendor: qcom
+  socs:
+    - name: qcc743

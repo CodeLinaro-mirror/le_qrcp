@@ -1,0 +1,18 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+description: |
+  Qualcomm RCP virtual UART endpoint
+
+compatible: "qcom,rcp-vserial-uart"
+
+include: uart-controller.yaml
+
+properties:
+  port:
+    type: int
+    required: true
+    enum: [0, 1, 2, 3]
+    description: |
+      RCP virtual UART port index. Port 0 maps to RCP_STREAM_VSERIAL0,
+      port 1 to RCP_STREAM_VSERIAL1, and so on.

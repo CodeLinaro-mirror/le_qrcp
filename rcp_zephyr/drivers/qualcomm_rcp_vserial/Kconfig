@@ -1,0 +1,37 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+menuconfig QUALCOMM_RCP_VSERIAL_UART
+	bool "Qualcomm RCP virtual serial UART driver"
+	default y
+	depends on SERIAL
+	depends on DT_HAS_QCOM_RCP_VSERIAL_UART_ENABLED
+	help
+	  This driver exposes up to four UART-like virtual serial ports over
+	  RCP streams RCP_STREAM_VSERIAL0..3.
+
+if QUALCOMM_RCP_VSERIAL_UART
+
+module = QUALCOMM_RCP_VSERIAL_UART
+module-str = qualcomm_rcp_vserial_uart
+source "subsys/logging/Kconfig.template.log_config"
+
+config QUALCOMM_RCP_VSERIAL_RX_BUFFER_SIZE
+	int "RCP virtual serial RX ring buffer size"
+	range 64 4096
+	default 512
+	help
+	  Per-port RX ring buffer size for UART data received from RCP stream.
+
+config QUALCOMM_RCP_VSERIAL_TX_CHUNK_SIZE
+	int "RCP virtual serial TX chunk size"
+	range 16 512
+	default 128
+	help
+	  Maximum payload size per RCP frame when sending UART TX data.
+
+config QUALCOMM_RCP_VSERIAL_INIT_PRIORITY
+	int "RCP vserial driver init priority"
+	default 90
+
+endif # QUALCOMM_RCP_VSERIAL_UART

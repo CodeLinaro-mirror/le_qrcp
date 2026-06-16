@@ -1,0 +1,88 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+module = QUALCOMM_RCP_PROTOCOL
+module-str = qualcomm_rcp_protocol
+source "subsys/logging/Kconfig.template.log_config"
+
+config QUALCOMM_RCP_PROTOCOL_NUM_BUFFERS
+    int "Number of RCP protocol buffers"
+    default 10
+    help
+      "Number of available RCP protocol buffers"
+
+config QUALCOMM_RCP_PROTOCOL_BUFFER_SIZE
+    int "Size of a single RCP protocol buffer"
+    default 500
+    help
+      "Size of single static RCP buffer in bytes"
+
+config QUALCOMM_RCP_RCP_MAX_TX_EVENTS
+  int "Maximum length of TX message queue"
+  default 10
+  help
+    "Maximum number of TX message queue"
+
+config QUALCOMM_RCP_SEQ_NUM_ACK_WINDOW
+  int "ACK window for RCP protocol"
+  default 5
+  help
+    "Maximum number of intermediate messages between an RCP message and a"
+    "corresponding ACK."
+
+config QUALCOMM_RCP_VSERIAL_PORT_COUNT
+    int "Number of RCP virtual serial ports"
+    range 0 4
+    default 0
+    help
+      How many RCP virtual serial UART devices to expose over RCP streams
+      (0..4).
+
+menuconfig QUALCOMM_RCP_ENCRYPTION
+    bool "Enable RCP message encryption"
+    default n
+    depends on (MBEDTLS && MBEDTLS_PSA_CRYPTO_C)
+    select PSA_WANT_ALG_SHA_256
+    select PSA_WANT_ALG_HMAC
+    select PSA_WANT_ALG_HKDF
+    select PSA_WANT_ALG_GCM
+    select PSA_WANT_ALG_ECDH
+    select PSA_WANT_ALG_ECDSA
+    select PSA_WANT_KEY_TYPE_AES
+    select PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_GENERATE
+    select PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_EXPORT
+    select PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_IMPORT
+    select PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY
+    select PSA_WANT_ECC_SECP_R1_256
+
+if QUALCOMM_RCP_ENCRYPTION
+
+config QUALCOMM_RCP_ENCRYPT_WIFI_MGMT
+    bool "Encrypt WiFi management messages"
+    default y
+
+config QUALCOMM_RCP_ENCRYPT_WIFI_DATA
+    bool "Encrypt WiFi data messages"
+    default n
+
+config QUALCOMM_RCP_ENCRYPT_BT
+    bool "Encrypt Bluetooth HCI messages"
+    default n
+
+config QUALCOMM_RCP_ENCRYPT_THREAD
+    bool "Encrypt Bluetooth Thread spinel messages"
+    default n
+
+endif # QUALCOMM_RCP_ENCRYPTION
+
+choice QUALCOMM_RCP_DEFAULT_BUS
+  bool "Default bus used by RCP protocol"
+    default QUALCOMM_RCP_DEFAULT_BUS_SDIO
+
+config QUALCOMM_RCP_DEFAULT_BUS_SDIO
+  bool "RCP over SDIO by default"
+
+config QUALCOMM_RCP_DEFAULT_BUS_SPI
+  bool "RCP over SPI by default"
+
+endchoice

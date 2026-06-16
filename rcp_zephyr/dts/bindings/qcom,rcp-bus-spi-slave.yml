@@ -1,0 +1,16 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+description: |
+  Qualcomm RCP bus SPI slave
+
+compatible: "qcom,rcp-bus-spi-slave"
+
+include: [base.yaml]
+
+on-bus: spi
+
+properties:
+  irq-gpios:
+    type: phandle-array
+    required: true

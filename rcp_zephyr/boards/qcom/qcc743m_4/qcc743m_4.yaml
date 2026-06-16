@@ -1,0 +1,33 @@
+# Copyright (c) 2025 Qualcomm Technologies, Inc. and/or its subsidiaries
+# SPDX-License-Identifier: Apache-2.0
+
+identifier: qcc743_4
+name: QCC743-4 Module
+type: mcu
+arch: riscv
+ram: 480
+toolchain:
+  - zephyr
+supported:
+  - adc
+  - bluetooth
+  - comparator
+  - counter
+  - crypto
+  - dac
+  - dma
+  - entropy
+  - flash
+  - gpio
+  - hwinfo
+  - i2c
+  - i2s
+  - ir
+  - pwm
+  - reset
+  - rtc
+  - serial
+  - spi
+  - watchdog
+  - wifi
+vendor: qcom

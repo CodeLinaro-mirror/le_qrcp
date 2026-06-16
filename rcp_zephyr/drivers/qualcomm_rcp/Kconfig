@@ -1,0 +1,52 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+menuconfig QUALCOMM_RCP_BUS_DRIVERS
+	bool "Qualcomm RCP bus drivers"
+	help
+	  These drivers implement Qualcomm's RCP bus API that provides generic transport
+	  interface for communicating with Qualcomm RCP device.
+
+if QUALCOMM_RCP_BUS_DRIVERS
+
+module = QUALCOMM_RCP_BUS
+module-str = qualcomm_rcp_bus
+source "subsys/logging/Kconfig.template.log_config"
+
+menuconfig QUALCOMM_RCP_BUS_SDIO_SLAVE
+	bool "Qualcomm RCP bus SDIO slave driver"
+	default y
+	depends on DT_HAS_QCOM_RCP_BUS_SDIO_SLAVE_ENABLED
+	depends on SDIO
+
+if QUALCOMM_RCP_BUS_SDIO_SLAVE
+endif # QUALCOMM_RCP_BUS_SDIO_SLAVE
+
+menuconfig QUALCOMM_RCP_BUS_SPI_SLAVE
+	bool "Qualcomm RCP bus SPI slave driver"
+	default y
+	depends on DT_HAS_QCOM_RCP_BUS_SPI_SLAVE_ENABLED
+	depends on SPI
+
+if QUALCOMM_RCP_BUS_SPI_SLAVE
+
+config RCP_BUS_SPI_TX_QUEUE_SIZE
+	int "SPI TX queue size"
+	default 30
+	help
+	  Maximum number of RCP packets passed to SPI TX queue.
+	  The queue only holds references to RCP packets from common pool, passed
+	  by application when writing. The packets are freed after master reads
+	  data from slave. The number can be set quite large in case of slow
+	  master processing and a lot of RCP packets in flight.
+
+config RCP_BUS_SPI_RX_QUEUE_SIZE
+	int "SPI RX queue size"
+	default 5
+	help
+	  Number of RCP packets in RX queue. The RX packets are acquired from common
+	  pool and freed once application reads data from the driver.
+
+endif # QUALCOMM_RCP_BUS_SPI_SLAVE
+
+endif # QUALCOMM_RCP_BUS_DRIVERS

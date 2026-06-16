@@ -1,0 +1,37 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+manifest:
+  self:
+    west-commands: scripts/west-commands.yml
+
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+    - name: qcc74x-github
+      url-base: https://github.qualcomm.com/QCC74x
+
+  group-filter:
+    - +optional # allow nanopb import
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.1.0
+      import:
+        # By using name-allowlist we can clone only the modules that are
+        # strictly needed by the application.
+        name-allowlist:
+          - cmsis
+          - hal_nordic
+          - hal_stm32
+          - cmsis_6
+          - mbedtls
+          - nanopb
+          - openthread
+    - name: qcc74x_zephyr_unikie
+      remote: qcc74x-github
+      revision: master
+      path: modules/qcc74xzephyrporting
+      import:
+        name-allowlist:
+          - qcc74x_zephyr_hal
