@@ -56,6 +56,16 @@ uint8_t rcp_events_wait_for_any(uint8_t evts, uint16_t timeout_ms)
 			return 0;
 		}
 
+		/* Block forever: stay pending with no kernel timeout so the SoC can
+		 * enter deep sleep. Woken only by rcp_events_set (TX/RX events). */
+		if (timeout_ms == RCP_WAIT_FOREVER) {
+			if (true != rcp_os_sem_take(&rcp_evt.sem, RCP_OS_WAIT_FOREVER)) {
+				return 0;
+			}
+			/* Got notification, loop and re-check flags. */
+			continue;
+		}
+
 		/* Adjust timeout if we are waiting for more flags. */
 		elapsed = rcp_os_time_ms() - start;
 		if (elapsed >= timeout_ms) {

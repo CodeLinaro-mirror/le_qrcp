@@ -7,12 +7,10 @@
 #define RCP_WIFI_CFG80211_H
 
 #include <linux/netdevice.h>
-#include <linux/wireless.h>
 #include <net/cfg80211.h>
 #include <linux/spi/spi.h>
 #include <linux/spinlock.h>
 #include <linux/kthread.h>
-#include <linux/wait.h>
 #include <linux/completion.h>
 #include <linux/workqueue.h>
 #include <rcp_interface.h>
@@ -34,13 +32,11 @@ struct rcp_priv {
 	struct spi_device                 *spi;
 	struct cfg80211_scan_request      *scan_request;
 	struct task_struct                *event_thread;
-	wait_queue_head_t                  wait_queue;
 	spinlock_t                         lock;
 	/* TX skbs queued by ndo_start_xmit (may run in softirq/atomic context)
 	 * and drained by the event loop kthread (process context), which does the
 	 * sleeping get_buffer()/link_send() work. sk_buff_head has its own lock. */
 	struct sk_buff_head                tx_skb_q;
-	atomic_t                           rx_events;
 	/* Chip capability description (selected via of_match .data at probe).
 	 * Const; the generic code reads chip params from here instead of
 	 * hardcoding QCC730 constants. */
@@ -55,7 +51,6 @@ struct rcp_priv {
 	struct ieee80211_rate             *rates_bg;	/* kmemdup; cfg80211
 							 * writes bitrate flags */
 	struct ieee80211_rate             *rates_ofdm;
-	uint8_t                            mac_addr[ETH_ALEN];
 	/* QCC730 STA and SAP ifaces have distinct MACs (SAP = STA-1). The single
 	 * netdev uses the STA MAC by default; .start_ap switches it to the SAP MAC
 	 * so downlink frames' source MAC matches the over-the-air BSSID. */
@@ -109,6 +104,16 @@ struct rcp_priv {
 	 * not block for the full timeout while the QcSPI link is unavailable
 	 * (probe before sync, or teardown after the event kthread is stopped). */
 	bool                               mgmt_ready;
+	/* Two-state power FSM tracking whether the QCC730 is awake or asleep.
+	 * Maintained locally by set_power_mgmt (on -> ASLEEP, off -> AWAKE). The
+	 * SPI bus layer (rcp_bus_spi_master_linux_qcc730.c) reaches these via the
+	 * global g_priv: rcp_bus_wakeup_qcc730() reads pwr_state and, if ASLEEP,
+	 * pulses GPIO16 to wake the 730 before the PS-config command is sent. */
+	enum rcp_pwr_state {
+		RCP_PWR_AWAKE = 0,
+		RCP_PWR_ASLEEP,
+	}                                  pwr_state;
+	spinlock_t                         pwr_lock;   /* guards pwr_state */
 };
 
 /* Map an RCP band enum to the nl80211 band. */

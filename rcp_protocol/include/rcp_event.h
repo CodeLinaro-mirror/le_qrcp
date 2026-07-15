@@ -21,6 +21,11 @@
 		       RCP_EVENT_RX_DATA | \
 		       RCP_EVENT_TX_DATA)
 
+/* Wait forever (no timeout) in rcp_events_wait_for_any. The event-loop thread
+ * uses this when idle so it stays pending with no kernel timeout, letting the
+ * SoC enter deep sleep (S2RAM) instead of waking on a periodic wait timeout. */
+#define RCP_WAIT_FOREVER 0xFFFFU
+
 /* Initialize events */
 bool rcp_events_init(void);
 /* Set a specific event flag. */

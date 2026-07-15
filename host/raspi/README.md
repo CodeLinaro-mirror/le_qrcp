@@ -452,6 +452,11 @@ matching driver struct; GET commands return the raw struct in `response_payload`
 | `0x10` | GET_BMISS_THRESHOLD | GET | `threshold:u32` | |
 | `0x11` | SET_CTS_TO_SELF | SET | `enable:u32` | 1 = enable, 0 = disable; needs conn |
 | `0x12` | UNIT_TEST | SET | `vdev_id:u8, module_id:u8, num_args:u16, args:u32[16]` | firmware unit-test dispatch; results print on the **QCC730 serial console**, not returned |
+| `0x13` | SET_IGNORE_BC_MC_IN_BMPS | SET | `enable:u8` | in BMPS, ignore broadcast/multicast to stay asleep; needs conn + BMPS |
+| `0x14` | SET_POWER_OPT_IN_BMPS | SET | `enable:u8` | in BMPS, enable extra power optimization; needs conn + BMPS |
+| `0x15` | SET_COMPRESS_QOS_NULL_IN_BMPS | SET | `enable:u8` | in BMPS, send compressed QoS-Null frames; needs conn + BMPS |
+| `0x16` | SET_RX_FILTER_IN_BMPS | SET | `enable:u8` | in BMPS, enable RX filtering (firmware-default rule set, cb stays firmware-side); needs conn + BMPS |
+| `0x17` | SET_LISTEN_INTERVAL | SET | `listen_interval:u16` | STA listen interval in **beacon intervals** (0..65535); `WIFI_PS_PARAM_LISTEN_INTERVAL` → qapi; needs conn |
 
 > **EDCA value semantics (qapi, not a bug):** `cw_min`/`cw_max` are **exponents** —
 > the firmware stores `2^e − 1` (so writing `cw_min=5` reads back `31`). `txop_limit`
@@ -493,6 +498,11 @@ EDCA qid0 默认 `00 25 0f 00 ff 03 00 00`）。EDCA：cw_min/cw_max 为指数�
 | `sudo iw dev wlan1 vendor send 0x001374 0xa 0x28 0x00 0x0f 0x00; echo rc=$?` | `rc=0`（恢复 BA_WIN=40/15 默认） | `rc=0` | 恢复步 |
 | `sudo iw dev wlan1 vendor send 0x001374 0xc 0x40 0x00 0x40 0x00; echo rc=$?` | `rc=0`（SET_BA_WIN_SIZE tx/rx=64） | `rc=0` | **未关联**（此 SET 需断开态） |
 | `sudo iw dev wlan1 vendor send 0x001374 0xd 0x02 0x00 0x00 0x00 2>&1` | `command failed: Input/output error (-5)`（SLOT=2 非法拒绝） | `Input/output error` | 已关联 |
+| `sudo iw dev wlan1 vendor send 0x001374 0x13 0x01; echo rc=$?` | `rc=0`（IGNORE_BC_MC_IN_BMPS on） | `rc=0` | 已关联 + BMPS 未开 |
+| `sudo iw dev wlan1 vendor send 0x001374 0x14 0x01; echo rc=$?` | `rc=0`（POWER_OPT_IN_BMPS on） | `rc=0` | 已关联 + BMPS 未开 |
+| `sudo iw dev wlan1 vendor send 0x001374 0x15 0x01; echo rc=$?` | `rc=0`（COMPRESS_QOS_NULL_IN_BMPS on） | `rc=0` | 已关联 + BMPS 未开 |
+| `sudo iw dev wlan1 vendor send 0x001374 0x16 0x01; echo rc=$?` | `rc=0`（RX_FILTER_IN_BMPS on） | `rc=0` | 已关联 + BMPS 未开 |
+| `sudo iw dev wlan1 vendor send 0x001374 0x17 0x0a 0x00; echo rc=$?` | `rc=0`（SET_LISTEN_INTERVAL=10 beacons，**待实测**） | `rc=0` | 已关联 |
 
 ### wpa_cli vendor — verified output
 
@@ -524,6 +534,11 @@ EDCA qid0 默认 `00 25 0f 00 ff 03 00 00`）。EDCA：cw_min/cw_max 为指数�
 | `wpa_cli -i wlan1 vendor 0x001374 10 32001400 nested=0; wpa_cli -i wlan1 vendor 0x001374 11` | `32001400`（SET_BA_WIN=50/20 后回读） | `32001400` | 已关联、`nested=0` |
 | `out=$(wpa_cli -i wlan1 vendor 0x001374 10 28000f00 nested=0); echo ${out:-OK}` | `OK`（恢复 BA_WIN=40/15） | `OK` | 恢复步 |
 | `wpa_cli -i wlan1 vendor 0x001374 13 02000000 nested=0` | `FAIL`（SLOT=2 非法，firmware 拒绝） | `FAIL` | 已关联、`nested=0` |
+| `out=$(wpa_cli -i wlan1 vendor 0x001374 19 01 nested=0); echo ${out:-OK}` | `OK`（IGNORE_BC_MC_IN_BMPS on） | `OK` | 已关联 + BMPS 未开、`nested=0` |
+| `out=$(wpa_cli -i wlan1 vendor 0x001374 20 01 nested=0); echo ${out:-OK}` | `OK`（POWER_OPT_IN_BMPS on） | `OK` | 已关联 + BMPS 未开、`nested=0` |
+| `out=$(wpa_cli -i wlan1 vendor 0x001374 21 01 nested=0); echo ${out:-OK}` | `OK`（COMPRESS_QOS_NULL_IN_BMPS on） | `OK` | 已关联 + BMPS 未开、`nested=0` |
+| `out=$(wpa_cli -i wlan1 vendor 0x001374 22 01 nested=0); echo ${out:-OK}` | `OK`（RX_FILTER_IN_BMPS on） | `OK` | 已关联 + BMPS 未开、`nested=0` |
+| `out=$(wpa_cli -i wlan1 vendor 0x001374 23 0a00 nested=0); echo ${out:-OK}` | `OK`（SET_LISTEN_INTERVAL=10 beacons，**待实测**） | `OK` | 已关联、`nested=0` |
 
 ## Changing the protobuf protocol
 

@@ -11,7 +11,6 @@
 #include <linux/spi/spi.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
-#include <linux/wireless.h>
 #include <linux/ieee80211.h>
 #include <linux/kthread.h>
 #include <linux/gpio/consumer.h>
@@ -108,8 +107,7 @@ static int rcp_event_loop_thread(void *arg)
 }
 
 /* Assemble a writable supported_band from the chip caps. cfg80211 mutates
- * channel flags (reg/DFS) at runtime, so channels must be a writable kmemdup,
- * not the const caps template. Returns 0 or -ENOMEM. */
+ * channel flags (reg/DFS) at runtime, so channels must be a writable kmemdup. */
 static int rcp_build_band(struct rcp_priv *priv)
 {
 	const struct rcp_chip_caps *c = priv->chip_caps;
@@ -180,12 +178,12 @@ static int rcp_wifi_probe(struct spi_device *spi)
 	}
 
 	spin_lock_init(&priv->lock);
-	init_waitqueue_head(&priv->wait_queue);
 	skb_queue_head_init(&priv->tx_skb_q);
-	atomic_set(&priv->rx_events, 0);
 	init_completion(&priv->iface_status_done);
 	init_completion(&priv->tx_power_done);
 	INIT_DELAYED_WORK(&priv->connect_fail_work, rcp_connect_fail_work);
+	priv->pwr_state = RCP_PWR_AWAKE;
+	spin_lock_init(&priv->pwr_lock);
 	g_priv = priv;
 
 	/* Get IRQ number from device tree "interrupts" property */
@@ -214,23 +212,20 @@ static int rcp_wifi_probe(struct spi_device *spi)
 		return 0;
 	}
 
-	/* Register WiFi MGMT RX handler (handle_rcp_msg in rcp_wifi_mgmt.c).
-	 * rcp_wifi_init() resets num_cb to 0, so register the event callback
-	 * AFTER rcp_wifi_init() to survive the reset. */
+	/* rcp_wifi_init() resets num_cb to 0, so register the event callback
+	 * AFTER it to survive the reset. */
 	rcp_wifi_init();
 	rcp_wifi_register_callback(rcp_wifi_evt_cb);
 
-	/* Register WiFi DATA RX handler so uplink Ethernet frames are
-	 * delivered to the Linux network stack instead of being dropped. */
+	/* Deliver uplink Ethernet frames to the Linux net stack. */
 	link_register_rx_handler(RCP_STREAM_WIFI_DATA, wifi_data_rx_handler);
 
 	/* Set up wiphy */
 	wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
 				 BIT(NL80211_IFTYPE_AP);
-	/* QCC730 firmware is the AP SME/authenticator (runs the 4-way handshake,
-	 * owns PTK/GTK, builds the RSN beacon). Advertising HAVE_AP_SME makes
-	 * hostapd run in full-offload mode and pass the PSK via start_ap's
-	 * crypto.psk instead of running the software authenticator. */
+	/* Firmware is the AP SME/authenticator (4-way handshake, PTK/GTK, RSN
+	 * beacon). HAVE_AP_SME makes hostapd run full-offload and pass the PSK via
+	 * start_ap's crypto.psk instead of running the software authenticator. */
 	wiphy->flags |= WIPHY_FLAG_HAVE_AP_SME;
 	ret = rcp_build_band(priv);
 	if (ret)
@@ -240,10 +235,8 @@ static int rcp_wifi_probe(struct spi_device *spi)
 	wiphy->available_antennas_tx = priv->chip_caps->antenna_tx;
 	wiphy->available_antennas_rx = priv->chip_caps->antenna_rx;
 	wiphy->max_scan_ssids           = 1;
-	/* Max length of vendor/extra IEs the supplicant may append to scan
-	 * requests. Defaults to 0, which makes the kernel reject any scan
-	 * carrying an IE (-EINVAL); wpa_supplicant 2.11 appends an Extended
-	 * Capabilities IE, so this must be non-zero for scans to succeed. */
+	/* Must be non-zero: wpa_supplicant 2.11 appends an Extended Capabilities
+	 * IE to scans, and a 0 limit makes the kernel reject any scan with an IE. */
 	wiphy->max_scan_ie_len          = 256;
 	wiphy->cipher_suites            = rcp_cipher_suites;
 	wiphy->n_cipher_suites          = rcp_cipher_suites_count;
@@ -256,11 +249,9 @@ static int rcp_wifi_probe(struct spi_device *spi)
 	 * precomputed 32-byte PMK via cfg80211_ap_settings.crypto.psk. */
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_4WAY_HANDSHAKE_AP_PSK);
 
-	/* Advertise supported AKMs (incl. SAE) so supplicant selects WPA3 BSS.
-	 * Set BOTH the global akm_suites (parsed into drv->capa.key_mgmt, used at
-	 * association time) and the per-iftype list (used by get_capability).
-	 * Without the global list, association fails with
-	 * "available key_mgmt 0x0 / Failed to select authenticated key mgmt". */
+	/* Set BOTH the global akm_suites (used at association time) and the
+	 * per-iftype list (used by get_capability); without the global list,
+	 * association fails with "available key_mgmt 0x0". */
 	wiphy->akm_suites            = rcp_akm_suites;
 	wiphy->n_akm_suites          = ARRAY_SIZE(rcp_akm_suites);
 	wiphy->iftype_akm_suites     = rcp_iftype_akm;
@@ -299,6 +290,12 @@ static int rcp_wifi_probe(struct spi_device *spi)
 	if (ret < 0)
 		goto err_netdev;
 
+	/* cfg80211_init_wdev() set wdev->ps = true (Pi kernel builds
+	 * CONFIG_CFG80211_DEFAULT_PS=y); the NETDEV_UP notifier would then push
+	 * that default to set_power_mgmt(enabled=1) and drop the slave into BMPS on
+	 * every insmod. Default PS off; `iw set power_save on` still works. */
+	priv->wdev.ps = false;
+
 	/* Start event loop kthread */
 	priv->event_thread = kthread_run(rcp_event_loop_thread, priv,
 					 "rcp_wifi");
@@ -310,9 +307,8 @@ static int rcp_wifi_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, priv);
 	dev_info(&spi->dev, "QCC730 RCP WiFi driver probed");
 
-	/* Trigger initial WIFI_MGMT sync by sending get_l2_interfaces.
-	 * This queues a message in the TX queue; the event loop kthread will
-	 * pick it up and send it, initiating the WIFI_MGMT stream handshake. */
+	/* Trigger initial WIFI_MGMT sync: queues get_l2_interfaces, which the event
+	 * loop kthread sends, initiating the WIFI_MGMT stream handshake. */
 	rcp_wifi_get_l2_interfaces(RCP_NET_IF_TYPE_WIFI, 0);
 
 	return 0;
@@ -357,10 +353,8 @@ static void rcp_wifi_remove(struct spi_device *spi)
 		return;
 	}
 
-	/* Block any further synchronous vendor commands: the event kthread is
-	 * about to stop, so a vendor cmd issued during teardown (e.g. cfg80211
-	 * reading tx power on disconnect) would never get a reply and block for
-	 * the full timeout. */
+	/* Block further synchronous vendor commands: the event kthread is about to
+	 * stop, so a vendor cmd during teardown would block for the full timeout. */
 	priv->mgmt_ready = false;
 
 	/* Stop the event loop kthread before touching cfg80211 state so no
@@ -380,10 +374,9 @@ static void rcp_wifi_remove(struct spi_device *spi)
 		priv->connect_bss = NULL;
 	}
 
-	/* Clean up pending cfg80211 state before unregistering the wdev.
-	 * wiphy_lock() serializes with cfg80211's internal work queue and
-	 * prevents WARN_ON in _cfg80211_unregister_wdev when the wdev is
-	 * still connected or has an active scan at rmmod time. */
+	/* Clean up pending cfg80211 state before unregistering the wdev; wiphy_lock
+	 * serializes with cfg80211's work queue and prevents a WARN_ON in
+	 * _cfg80211_unregister_wdev if still connected / scanning at rmmod. */
 	wiphy_lock(wiphy);
 
 	/* Notify cfg80211 of disconnect if still associated */

@@ -437,6 +437,28 @@ enum rcp_wifi_status rcp_wifi_get_tx_power(uint32_t if_index)
 	return encode_and_send(&mgmt_req);
 }
 
+enum rcp_wifi_status rcp_wifi_set_ps_config(uint32_t if_index, bool enable, int32_t timeout_ms)
+{
+	ros_wifi_v1_WifiMgmtRequest mgmt_req = ros_wifi_v1_WifiMgmtRequest_init_zero;
+
+	mgmt_req.op = ros_wifi_v1_RequestType_REQUEST_TYPE_SET_PS_CONFIG;
+	mgmt_req.which_payload = ros_wifi_v1_WifiMgmtRequest_set_ps_config_tag;
+	mgmt_req.payload.set_ps_config.iface_index = if_index;
+	/* config and ps_settings are OPTIONAL submessages: presence flags MUST
+	 * be set or nanopb omits them and the 730 receives an empty config. */
+	mgmt_req.payload.set_ps_config.has_config = true;
+	mgmt_req.payload.set_ps_config.config.has_ps_settings = true;
+	mgmt_req.payload.set_ps_config.config.ps_settings.enabled =
+		enable ? ros_wifi_v1_WifiPsState_WIFI_PS_STATE_ENABLE
+		       : ros_wifi_v1_WifiPsState_WIFI_PS_STATE_DISABLE;
+	/* iw passes timeout=-1 for "driver default"; proto field is uint32 and the
+	 * firmware gates on timeout_ms > 0, so send 0 (=default) for any non-positive value. */
+	mgmt_req.payload.set_ps_config.config.ps_settings.timeout_ms =
+		(timeout_ms > 0) ? (uint32_t)timeout_ms : 0u;
+
+	return encode_and_send(&mgmt_req);
+}
+
 enum rcp_wifi_status rcp_wifi_get_reg_domain(uint32_t if_index)
 {
 	ros_wifi_v1_WifiMgmtRequest mgmt_req = {};

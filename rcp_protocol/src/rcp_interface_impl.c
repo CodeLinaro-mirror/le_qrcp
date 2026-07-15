@@ -240,8 +240,12 @@ link_state_t link_get_state(uint8_t stream)
 void run_event_loop_once(void)
 {
 	rcp_msg_t rx_msg;
+	/* Block forever when idle so the SoC can enter deep sleep (S2RAM). A
+	 * periodic timeout here keeps waking the event-loop thread, which clamps
+	 * BMPS/S2RAM sleep and shows up as EXIT_REASON_RTOS_TIME on the WLAN side.
+	 * RX (QcSPI ISR) and TX (tx scheduler) both rcp_events_set to wake us. */
 	uint8_t events = rcp_events_wait_for_any(
-		RCP_EVENT_TX_DATA | RCP_EVENT_RX_DATA, 1000);
+		RCP_EVENT_TX_DATA | RCP_EVENT_RX_DATA, RCP_WAIT_FOREVER);
 
 	if ((events & RCP_EVENT_TX_DATA) && !is_tx_empty()) {
 		events = rcp_events_get();

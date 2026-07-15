@@ -612,6 +612,14 @@ enum rcp_wifi_status rcp_wifi_set_tx_power(uint32_t if_index, uint8_t txpower, u
 enum rcp_wifi_status rcp_wifi_get_tx_power(uint32_t if_index);
 
 /**
+ * Enable/disable STA BMPS power save on the 730.
+ * @param if_index  interface index
+ * @param enable    true=enter BMPS, false=exit
+ * @param timeout_ms BMPS idle timeout in ms; -1 => firmware default
+ */
+enum rcp_wifi_status rcp_wifi_set_ps_config(uint32_t if_index, bool enable, int32_t timeout_ms);
+
+/**
  * Request Regulatory Domain info
  *
  * @param if_index Indicates which interface to get reg info

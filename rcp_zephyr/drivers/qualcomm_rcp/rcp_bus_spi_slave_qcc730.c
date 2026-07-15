@@ -102,18 +102,24 @@ bool ring_all_tx_consumed(void)
 	if (!g_rcp_bus_open)
 		return true;
 
-	/* Wake-only. The host owns slot release: it zeroes slot[rd].len in shared
-	 * memory when it consumes a slot, which is the sole "slot free" signal.
-	 * This ISR just wakes a producer that may be blocked in qcc730_qcspi_write
-	 * (which re-reads slot.len to decide). We do NOT advance rd_idx or clear
-	 * len here: inferring host progress by counting INT1 edges is exactly what
-	 * desynced under edge coalescing at high rate. */
+	/* Wake a producer that may be blocked in qcc730_qcspi_write (it re-reads
+	 * slot.len to decide). The host owns slot release: it zeroes slot[rd].len
+	 * when it consumes a slot, which is the sole "slot free" signal. We do NOT
+	 * advance rd_idx or clear len here: inferring host progress by counting
+	 * INT1 edges is exactly what desynced under edge coalescing at high rate. */
 	k_sem_give(&s2m_space_sem);
 
 	/* Re-arm TX_RDY so the shared event loop wakes and retries the write. */
 	rcp_events_set(RCP_EVENT_TX_RDY);
 
-	return false;
+	/* True only when every s2m slot is free (len==0) — the host has drained
+	 * the whole ring, so there is no in-flight TX and the caller may drop the
+	 * PM-busy hold. slot.len is the single source of truth for slot state. */
+	for (int i = 0; i < RCP_SHMEM_SLOTS; i++) {
+		if (g_rcp_shmem.s2m.slot[i].len != 0)
+			return false;
+	}
+	return true;
 }
 
 static enum rcp_bus_status qcc730_qcspi_open(void);
@@ -197,6 +203,13 @@ static enum rcp_bus_status qcc730_qcspi_write(uint8_t *tx, uint16_t len)
 	barrier_dmem_fence_full();
 	g_rcp_shmem.s2m.slot[wr].len = len;
 	g_rcp_shmem.s2m.wr_idx = (wr + 1) % RCP_SHMEM_SLOTS;
+
+#if defined(CONFIG_PM_DEVICE) && defined(CONFIG_SPI)
+    /* Prevent BMPS sleep until host reads the data */
+    const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(qcspi));
+    if (device_is_ready(spi_dev))
+        pm_device_busy_set(spi_dev);
+#endif
 
 	/* Toggle LOW→HIGH to guarantee a rising edge notifying the host. */
 	gpio_pin_set_dt(&irq_gpio, 0);

@@ -31,7 +31,9 @@ bool rcp_os_sem_give(rcp_sem_t *sem)
 
 bool rcp_os_sem_take(rcp_sem_t *sem, uint32_t timeout)
 {
-	if (0 != k_sem_take(&(sem->_sem), K_MSEC(timeout))) {
+	k_timeout_t t = (timeout == RCP_OS_WAIT_FOREVER) ? K_FOREVER : K_MSEC(timeout);
+
+	if (0 != k_sem_take(&(sem->_sem), t)) {
 		return false;
 	}
 	return true;

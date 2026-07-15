@@ -91,11 +91,16 @@ bool rcp_os_sem_init(rcp_sem_t *sem, uint32_t cnt, uint32_t limit);
  */
 bool rcp_os_sem_give(rcp_sem_t *sem);
 
+/* Block indefinitely in rcp_os_sem_take (no timeout). Lets the caller's thread
+ * stay pending with no kernel timeout so the SoC can enter deep sleep (S2RAM)
+ * instead of being woken by a periodic wait timeout. */
+#define RCP_OS_WAIT_FOREVER 0xFFFFFFFFU
+
 /**
  * Take a semaphore.
  *
  * @param sem Pointer to semaphore.
- * @param timeout Timeout in milliseconds.
+ * @param timeout Timeout in milliseconds, or RCP_OS_WAIT_FOREVER to block forever.
  * @return true if semaphore successfully taken, false if timeout or other error occurs.
  */
 bool rcp_os_sem_take(rcp_sem_t *sem, uint32_t timeout);

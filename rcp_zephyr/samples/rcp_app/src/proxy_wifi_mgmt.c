@@ -13,6 +13,9 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/pm/pm.h>
+#include <zephyr/pm/policy.h>
+#include <zephyr/pm/device.h>
 #include <string.h>
 #include <errno.h>
 
@@ -102,6 +105,8 @@ static void handle_vendor_cmd_request(ros_wifi_v1_VendorCmd *proto);
 static void handle_set_rts_threshold(ros_wifi_v1_SetRtsThresholdRequest *proto);
 static void handle_set_tx_power(ros_wifi_v1_SetTxPowerRequest *proto);
 static void handle_get_tx_power(ros_wifi_v1_GetTxPowerRequest *proto);
+static void handle_set_ps_config_request(ros_wifi_v1_SetPowerSaveConfigRequest *proto);
+static void handle_get_ps_config_request(ros_wifi_v1_GetPowerSaveConfigRequest *proto);
 
 /* Encode / decode management requests and events */
 static bool encode_wifi_mgmt_evt(ros_wifi_v1_WifiMgmtUplink *evt, uint8_t *buf, uint16_t buf_size,
@@ -663,6 +668,59 @@ static void send_uplink(ros_wifi_v1_WifiMgmtUplink *uplink)
 		log_send_uplink_drop(res);
 	}
 }
+
+#ifdef CONFIG_PM_DEVICE
+extern bool spi_is_ext_wakeup(void);
+extern void spi_clear_ext_wakeup_flag(void);
+
+static struct pm_notifier rcp_pm_notifier;
+
+static void rcp_pm_state_entry(enum pm_state state)
+{
+	ARG_UNUSED(state);
+	if (spi_is_ext_wakeup()) {
+		spi_clear_ext_wakeup_flag();
+	}
+}
+
+static void rcp_pm_state_exit(enum pm_state state)
+{
+	const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(qcspi));
+	struct net_if *iface = net_if_get_wifi_sta();
+
+	switch (state) {
+	case PM_STATE_SUSPEND_TO_RAM:
+	case PM_STATE_SOFT_OFF:
+		if (spi_is_ext_wakeup()) {
+			if (device_is_ready(spi_dev)) {
+				if (iface) {
+					struct qcom_wifi_pm_bmps_params bp = { .enable = 0u };
+					(void)net_mgmt(NET_REQUEST_WIFI_PM_QCOM_SET_BMPS_ENABLE,
+						       iface, &bp, sizeof(bp));
+					if (!pm_policy_state_lock_is_active(PM_STATE_SUSPEND_TO_RAM,
+									    PM_ALL_SUBSTATES)) {
+						pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_RAM,
+									 PM_ALL_SUBSTATES);
+					}
+				}
+			}
+			spi_clear_ext_wakeup_flag();
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+static int rcp_pm_notifier_init(void)
+{
+	rcp_pm_notifier.state_entry = rcp_pm_state_entry;
+	rcp_pm_notifier.state_exit = rcp_pm_state_exit;
+	pm_notifier_register(&rcp_pm_notifier);
+	return 0;
+}
+SYS_INIT(rcp_pm_notifier_init, POST_KERNEL, CONFIG_APPLICATION_INIT_PRIORITY);
+#endif /* CONFIG_PM_DEVICE */
 
 static uint32_t iface_ptr_to_index(struct net_if *iface)
 {
@@ -1373,6 +1431,110 @@ static void handle_get_tx_power(ros_wifi_v1_GetTxPowerRequest *proto)
 	send_uplink(&uplink);
 }
 
+static void handle_set_ps_config_request(ros_wifi_v1_SetPowerSaveConfigRequest *proto)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+	const struct device *wifi_dev = iface ? net_if_get_device(iface) : NULL;
+	int err = 0;
+	uint8_t enable;
+
+	ros_wifi_v1_WifiMgmtUplink uplink = ros_wifi_v1_WifiMgmtUplink_init_zero;
+	ros_wifi_v1_WifiMgmtResponse resp = ros_wifi_v1_WifiMgmtResponse_init_zero;
+
+	if (!iface) {
+		err = -ENODEV;
+		goto out;
+	}
+
+	/* proto WifiPsState: DISABLE=0, ENABLE=1 -> our on/off */
+	enable = (proto->config.ps_settings.enabled ==
+		  ros_wifi_v1_WifiPsState_WIFI_PS_STATE_ENABLE) ? 1u : 0u;
+
+	if (enable) {
+		/* Step 1: BMPS idle timeout (iw timeout arg, ms). >0 => set; else firmware default. */
+		if (proto->config.ps_settings.timeout_ms > 0) {
+			struct wifi_ps_params tparams = {0};
+			tparams.type = WIFI_PS_PARAM_TIMEOUT;
+			tparams.timeout_ms = proto->config.ps_settings.timeout_ms;
+			(void)net_mgmt(NET_REQUEST_WIFI_PS, iface, &tparams, sizeof(tparams));
+		}
+		/* Step 2: RX filter on (callback fixed firmware-side). */
+		{
+			struct qcom_wifi_pm_rx_filter_params rxf = {0};
+			rxf.enable = 1u;
+			rxf.bmps_rx_filter_cb = NULL; /* firmware default rules */
+			(void)net_mgmt(NET_REQUEST_WIFI_PM_QCOM_SET_RX_FILTER_IN_BMPS,
+				       iface, &rxf, sizeof(rxf));
+		}
+		/* Step 3: enable BMPS. */
+		{
+			struct qcom_wifi_pm_bmps_params bp = { .enable = 1u };
+			err = net_mgmt(NET_REQUEST_WIFI_PM_QCOM_SET_BMPS_ENABLE,
+				       iface, &bp, sizeof(bp));
+		}
+		/* Step 4: release S2RAM lock (only if held — the wakeup notifier or a
+		 * prior disable may have taken it); Step 5: clear wifi busy so S2RAM
+		 * can proceed. */
+		if (err == 0) {
+			if (pm_policy_state_lock_is_active(PM_STATE_SUSPEND_TO_RAM,
+							   PM_ALL_SUBSTATES)) {
+				pm_policy_state_lock_put(PM_STATE_SUSPEND_TO_RAM,
+							 PM_ALL_SUBSTATES);
+			}
+			if (wifi_dev && pm_device_is_busy(wifi_dev)) {
+				pm_device_busy_clear(wifi_dev);
+			}
+		}
+	} else {
+		/* Disable BMPS, then pin S2RAM off (mirror qat_ps_exit). Guard the
+		 * lock get so we don't stack a second lock if the wakeup notifier
+		 * already took it. */
+		struct qcom_wifi_pm_bmps_params bp = { .enable = 0u };
+		err = net_mgmt(NET_REQUEST_WIFI_PM_QCOM_SET_BMPS_ENABLE,
+			       iface, &bp, sizeof(bp));
+		if (err == 0 &&
+		    !pm_policy_state_lock_is_active(PM_STATE_SUSPEND_TO_RAM, PM_ALL_SUBSTATES)) {
+			pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_RAM, PM_ALL_SUBSTATES);
+		}
+	}
+
+	LOG_INF("set_ps_config: enable=%u timeout_ms=%d err=%d",
+		(unsigned)enable, (int)proto->config.ps_settings.timeout_ms, err);
+out:
+	resp_set_status(err, &resp, NULL);
+	uplink.payload.response = resp;
+	uplink.which_payload = ros_wifi_v1_WifiMgmtUplink_response_tag;
+	send_uplink(&uplink);
+}
+
+static void handle_get_ps_config_request(ros_wifi_v1_GetPowerSaveConfigRequest *proto)
+{
+	struct net_if *iface = net_if_get_wifi_sta();
+	struct wifi_ps_config cfg = {0};
+	int err;
+
+	ros_wifi_v1_WifiMgmtUplink uplink = ros_wifi_v1_WifiMgmtUplink_init_zero;
+	ros_wifi_v1_WifiMgmtResponse resp = ros_wifi_v1_WifiMgmtResponse_init_zero;
+
+	ARG_UNUSED(proto);
+
+	err = iface ? net_mgmt(NET_REQUEST_WIFI_PS_CONFIG, iface, &cfg, sizeof(cfg)) : -ENODEV;
+
+	resp_set_status(err, &resp, NULL);
+	if (err == 0) {
+		resp.which_payload = ros_wifi_v1_WifiMgmtResponse_ps_config_tag;
+		resp.payload.ps_config.has_config = true;
+		resp.payload.ps_config.config.has_ps_settings = true;
+		resp.payload.ps_config.config.ps_settings.enabled =
+			cfg.ps_params.enabled ? ros_wifi_v1_WifiPsState_WIFI_PS_STATE_ENABLE
+					      : ros_wifi_v1_WifiPsState_WIFI_PS_STATE_DISABLE;
+		resp.payload.ps_config.config.ps_settings.timeout_ms = cfg.ps_params.timeout_ms;
+	}
+	uplink.payload.response = resp;
+	uplink.which_payload = ros_wifi_v1_WifiMgmtUplink_response_tag;
+	send_uplink(&uplink);
+}
+
 static void handle_get_reg_domain(ros_wifi_v1_GetRegulatoryDomainRequest *)
 {
 	static struct wifi_reg_domain domain_data = {};
@@ -1446,7 +1608,6 @@ static void handle_get_version(ros_wifi_v1_GetWifiVersionRequest *)
 	ros_wifi_v1_WifiMgmtUplink uplink = ros_wifi_v1_WifiMgmtUplink_init_zero;
 	ros_wifi_v1_WifiMgmtResponse resp = ros_wifi_v1_WifiMgmtResponse_init_zero;
 
-	// static struct wifi_version wifi_ver = {};
 	int err = net_mgmt(NET_REQUEST_WIFI_VERSION, net_if_get_wifi_sta(), &wifi_ver,
 			   sizeof(wifi_ver));
 
@@ -1656,6 +1817,59 @@ static void handle_vendor_cmd_request(ros_wifi_v1_VendorCmd *proto)
 		}
 		break;
 	}
+	case QCC730_SUBCMD_SET_IGNORE_BC_MC_IN_BMPS: {
+		struct rcp_vc_bmps_flag f;
+		err = VC_COPY_REQ(f);
+		if (err == 0) {
+			struct qcom_wifi_pm_ignore_bc_mc_params p = { .enable = f.enable };
+			err = net_mgmt(NET_REQUEST_WIFI_PM_QCOM_IGNORE_BC_MC_IN_BMPS,
+				       iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_POWER_OPT_IN_BMPS: {
+		struct rcp_vc_bmps_flag f;
+		err = VC_COPY_REQ(f);
+		if (err == 0) {
+			struct qcom_wifi_pm_power_optimization_params p = { .enable = f.enable };
+			err = net_mgmt(NET_REQUEST_WIFI_PM_QCOM_SET_POWER_OPTIMIZATION_ENABLE_IN_BMPS,
+				       iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_COMPRESS_QOS_NULL_IN_BMPS: {
+		struct rcp_vc_bmps_flag f;
+		err = VC_COPY_REQ(f);
+		if (err == 0) {
+			struct qcom_wifi_pm_compress_qos_null_params p = { .enable = f.enable };
+			err = net_mgmt(NET_REQUEST_WIFI_PM_QCOM_SET_COMPRESS_QOS_NULL_ENABLE_IN_BMPS,
+				       iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_RX_FILTER_IN_BMPS: {
+		struct rcp_vc_bmps_flag f;
+		err = VC_COPY_REQ(f);
+		if (err == 0) {
+			struct qcom_wifi_pm_rx_filter_params p = {0};
+			p.enable = f.enable;
+			p.bmps_rx_filter_cb = NULL; /* firmware default rules */
+			err = net_mgmt(NET_REQUEST_WIFI_PM_QCOM_SET_RX_FILTER_IN_BMPS,
+				       iface, &p, sizeof(p));
+		}
+		break;
+	}
+	case QCC730_SUBCMD_SET_LISTEN_INTERVAL: {
+		struct rcp_vc_listen_interval li;
+		err = VC_COPY_REQ(li);
+		if (err == 0) {
+			struct wifi_ps_params p = {0};
+			p.type = WIFI_PS_PARAM_LISTEN_INTERVAL;
+			p.listen_interval = li.listen_interval;
+			err = net_mgmt(NET_REQUEST_WIFI_PS, iface, &p, sizeof(p));
+		}
+		break;
+	}
 	case QCC730_SUBCMD_UNIT_TEST: {
 		/* SET-only: results are logged on the QCC730 console, not returned. */
 		struct qcom_wifi_unit_test_params p;
@@ -1773,6 +1987,12 @@ static uint8_t handle_mgmt_msg(enum rcp_rx_status status, rcp_buffer_hdl_t *payl
 		break;
 	case ros_wifi_v1_WifiMgmtRequest_get_version_tag:
 		handle_get_version(&evt->payload.get_version);
+		break;
+	case ros_wifi_v1_WifiMgmtRequest_set_ps_config_tag:
+		handle_set_ps_config_request(&evt->payload.set_ps_config);
+		break;
+	case ros_wifi_v1_WifiMgmtRequest_get_ps_config_tag:
+		handle_get_ps_config_request(&evt->payload.get_ps_config);
 		break;
 	case ros_wifi_v1_WifiMgmtRequest_vendor_cmd_tag:
 		handle_vendor_cmd_request(&evt->payload.vendor_cmd);

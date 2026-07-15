@@ -39,6 +39,11 @@ enum qcc730_vendor_subcmd {
 	QCC730_SUBCMD_GET_BMISS_THRESHOLD = 16,
 	QCC730_SUBCMD_SET_CTS_TO_SELF     = 17,
 	QCC730_SUBCMD_UNIT_TEST           = 18,
+	QCC730_SUBCMD_SET_IGNORE_BC_MC_IN_BMPS       = 19,
+	QCC730_SUBCMD_SET_POWER_OPT_IN_BMPS          = 20,
+	QCC730_SUBCMD_SET_COMPRESS_QOS_NULL_IN_BMPS  = 21,
+	QCC730_SUBCMD_SET_RX_FILTER_IN_BMPS          = 22,
+	QCC730_SUBCMD_SET_LISTEN_INTERVAL            = 23,
 };
 
 /* ------------------------------------------------------------------
@@ -107,6 +112,17 @@ struct rcp_vc_bmiss_threshold {
 /* SET_CTS_TO_SELF (17) req */
 struct rcp_vc_cts_to_self {
 	uint32_t enable;
+} __attribute__((packed));
+
+/* SET_*_IN_BMPS (19-22) req: single on/off flag (rx_filter cb stays firmware-side) */
+struct rcp_vc_bmps_flag {
+	uint8_t enable;
+} __attribute__((packed));
+
+/* SET_LISTEN_INTERVAL (23) req: STA listen interval in beacon intervals.
+ * Bounded firmware-side by WIFI_LISTEN_INTERVAL_MIN/MAX; needs conn. */
+struct rcp_vc_listen_interval {
+	uint16_t listen_interval;
 } __attribute__((packed));
 
 /* UNIT_TEST (18) req (SET-only; results are logged on the QCC730 console) */

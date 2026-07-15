@@ -4,26 +4,13 @@
  *
  * Linux QcSPI master bus driver for QCC730 RCP.
  *
- * Low-level layer:
- *   - Pre-allocated DMA-safe TX/RX buffers in driver state struct
- *   - spi_lock mutex protecting shared buffers
- *   - Half-duplex write_then_read pattern for all commands
+ * Low-level: pre-allocated DMA-safe TX/RX buffers, spi_lock mutex, half-duplex
+ * write_then_read for all commands.
  *
- * High-level layer (ring protocol) matches rcp_bus_spi_slave_qcc730.c:
- *   - Fixed SHMEM_BASE layout with 8-slot m2s / s2m rings
- *   - HOST_INT0 doorbell: m2s slot committed (RPi -> QCC730)
- *   - HOST_INT1 doorbell: s2m slot consumed  (QCC730 -> RPi)
- *   - GPIO8 rising edge IRQ: QCC730 signals s2m data ready
- *
- * Write sequence (m2s: RPi -> QCC730):
- *   WRITE slot[wr].buf  -> RDSR poll
- *   WRITE slot[wr].len  -> RDSR poll  (commit)
- *   IRR CONFIG + set HOST_INT0 + IRW + clear + IRW  (doorbell)
- *
- * Read sequence (s2m: QCC730 -> RPi):
- *   FREAD slot[rd].len  (4B, take low 16 bits)
- *   FREAD [len_addr .. len+buf] padded (single transaction)
- *   IRR CONFIG + set HOST_INT1 + IRW + clear + IRW  (doorbell)
+ * High-level ring protocol (matches rcp_bus_spi_slave_qcc730.c): fixed
+ * SHMEM_BASE with 8-slot m2s / s2m rings. HOST_INT0 doorbell = m2s slot
+ * committed (RPi -> QCC730); HOST_INT1 = s2m slot consumed (QCC730 -> RPi);
+ * GPIO8 rising-edge IRQ = QCC730 signals s2m data ready.
  */
 
 #include <linux/module.h>
@@ -31,6 +18,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/atomic.h>
+#include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/string.h>
@@ -38,6 +26,7 @@
 
 #include "rcp_user_config.h"
 #include "rcp_bus_spi_master_linux_qcc730.h"
+#include "rcp_wifi_cfg80211.h"  /* struct rcp_priv, g_priv, power FSM fields */
 
 /* =========================================================================
  * QcSPI command codes (from Fermion qcc730.h)
@@ -137,6 +126,7 @@ struct rcp_spi_master {
 	struct spi_device  *spi;
 	struct gpio_desc   *irq_gpio;
 	struct gpio_desc   *reset_gpio;   /* QCC730 hard reset, active low */
+	struct gpio_desc   *wakeup_gpio;  /* GPIO16 -> QCC730 EXT_WAKEUP, active high */
 	int                 irq;
 	struct mutex        spi_lock;
 	/* Pre-allocated DMA-safe SPI buffers (Fermion pattern) */
@@ -301,13 +291,9 @@ static int qcspi_wr_reg(struct rcp_spi_master *priv, u8 reg, u32 val)
 
 /*
  * FREAD — read `size` bytes from AHB address `addr`.
- *
- * Protocol: set TRNS_LEN, then send [0x0B][addr_be4][10 dummy], receive data.
- * CS is held LOW throughout (TX header and RX data in one spi_message).
- * Polls RDSR BUSY after transfer.
- *
- * NOTE: qcspi_poll_busy() overwrites spi_rx_buf[0..3] with the RDSR value.
- * buf must be non-NULL; size bytes are copied to buf before poll_busy runs.
+ * Set TRNS_LEN, send [0x0B][addr_be4][10 dummy] + RX data in one CS-low
+ * spi_message, then poll RDSR BUSY. poll_busy overwrites spi_rx_buf[0..3], so
+ * the (non-NULL) buf is filled before it runs.
  */
 static int qcspi_fread(struct rcp_spi_master *priv, u32 addr, u8 *buf,
 		       u16 size)
@@ -341,15 +327,10 @@ static int qcspi_fread(struct rcp_spi_master *priv, u32 addr, u8 *buf,
 }
 
 /*
- * WRITE — write `size` bytes from `buf` to AHB address `addr`.
- *
- * Header and data are packed into a single contiguous spi_tx_buf and sent
- * as ONE spi_transfer.  Using two separate transfers causes a DMA-descriptor
- * boundary between the 5-byte header and the data; the brief MOSI-idle gap
- * at that boundary triggers a QcSPI TX-underrun (TXUERR, RDSR bit 28),
- * corrupting the first data byte.  Packing avoids this entirely.
- *
- * Data is zero-padded to a 4-byte boundary.
+ * WRITE — write `size` bytes from `buf` to AHB address `addr` (zero-padded to
+ * 4 bytes). Header + data are packed into ONE spi_transfer: two separate
+ * transfers leave a MOSI-idle gap at the DMA-descriptor boundary that triggers
+ * a QcSPI TX-underrun (TXUERR, RDSR bit 28) and corrupts the first data byte.
  */
 static int qcspi_write(struct rcp_spi_master *priv, u32 addr,
 		       const u8 *buf, u16 size)
@@ -376,47 +357,25 @@ static int qcspi_write(struct rcp_spi_master *priv, u32 addr,
 }
 
 /*
- * Doorbell helpers — pulse HOST_INT bit in SPI_SLAVE_CONFIG.
+ * Doorbell — pulse HOST_INT bit in SPI_SLAVE_CONFIG.
  *
- * QCC730 QcSPI fires HOST_INT0/INT1 TWICE for a single IRW (hardware quirk):
- * once when the command bytes are processed, and once at CS deassert
- * (end-of-transaction evaluation with SEQMOD=1 active).
- *
- * Fix: send SET + CLEAR as two consecutive IRW commands within a SINGLE CS
- * assertion (12 bytes, SEQMOD=1 allows sequential commands in one frame).
- * By the time CS deasserts, HOST_INT bit is already 0, so the second
- * hardware evaluation finds nothing pending and does not re-trigger.
+ * QCC730 QcSPI fires HOST_INT TWICE for a single IRW (hardware quirk): once
+ * when the command is processed, once at CS deassert (SEQMOD=1). Fix: send
+ * SET + CLEAR as two IRWs within ONE CS assertion (12 bytes), so by CS deassert
+ * the bit is already 0 and the second evaluation does not re-trigger.
  */
-static int qcspi_notify_int0(struct rcp_spi_master *priv)
+static int qcspi_notify(struct rcp_spi_master *priv, u32 int_bit)
 {
-	u32 cfg_set = priv->slave_config_cache | HOST_INT0_BIT;
+	u32 cfg_set = priv->slave_config_cache | int_bit;
 	u32 cfg_clr = priv->slave_config_cache;
 
-	/* IRW #1: set INT0 (fires interrupt) */
+	/* IRW #1: set the INT bit (fires interrupt) */
 	priv->spi_tx_buf[0]  = QCSPI_CMD_IRW; priv->spi_tx_buf[1]  = SPI_SLAVE_CONFIG;
 	priv->spi_tx_buf[2]  = (cfg_set >> 24) & 0xFF;
 	priv->spi_tx_buf[3]  = (cfg_set >> 16) & 0xFF;
 	priv->spi_tx_buf[4]  = (cfg_set >>  8) & 0xFF;
 	priv->spi_tx_buf[5]  =  cfg_set        & 0xFF;
-	/* IRW #2: clear INT0 (within same CS — prevents CS-deassert re-trigger) */
-	priv->spi_tx_buf[6]  = QCSPI_CMD_IRW; priv->spi_tx_buf[7]  = SPI_SLAVE_CONFIG;
-	priv->spi_tx_buf[8]  = (cfg_clr >> 24) & 0xFF;
-	priv->spi_tx_buf[9]  = (cfg_clr >> 16) & 0xFF;
-	priv->spi_tx_buf[10] = (cfg_clr >>  8) & 0xFF;
-	priv->spi_tx_buf[11] =  cfg_clr        & 0xFF;
-	return qcspi_xfer(priv, 12, 0);
-}
-
-static int qcspi_notify_int1(struct rcp_spi_master *priv)
-{
-	u32 cfg_set = priv->slave_config_cache | HOST_INT1_BIT;
-	u32 cfg_clr = priv->slave_config_cache;
-
-	priv->spi_tx_buf[0]  = QCSPI_CMD_IRW; priv->spi_tx_buf[1]  = SPI_SLAVE_CONFIG;
-	priv->spi_tx_buf[2]  = (cfg_set >> 24) & 0xFF;
-	priv->spi_tx_buf[3]  = (cfg_set >> 16) & 0xFF;
-	priv->spi_tx_buf[4]  = (cfg_set >>  8) & 0xFF;
-	priv->spi_tx_buf[5]  =  cfg_set        & 0xFF;
+	/* IRW #2: clear it (within same CS — prevents CS-deassert re-trigger) */
 	priv->spi_tx_buf[6]  = QCSPI_CMD_IRW; priv->spi_tx_buf[7]  = SPI_SLAVE_CONFIG;
 	priv->spi_tx_buf[8]  = (cfg_clr >> 24) & 0xFF;
 	priv->spi_tx_buf[9]  = (cfg_clr >> 16) & 0xFF;
@@ -462,11 +421,7 @@ static irqreturn_t rcp_irq_handler(int irq, void *dev_id)
  * rcp_bus_api implementation
  * ========================================================================= */
 
-/* Hard-reset the QCC730 and wait until it answers on QcSPI.
- *
- * This function pulses the active-low reset
- * line then retry until the chip is alive. 
- */
+/* Hard-reset the QCC730 (active-low pulse) and retry until it answers on QcSPI. */
 static int qcc730_reset(struct rcp_spi_master *priv)
 {
 	int r, p, ret;
@@ -512,14 +467,62 @@ static int qcc730_reset(struct rcp_spi_master *priv)
 	return -ENODEV;
 }
 
-/* Bring the QcSPI ring to a known-clean state (spi_lock held).
+/* A2F wake pulse timing. GPIO16 idles HIGH; wake = drive LOW, hold, then HIGH.
+ * The low period must be long enough for the 730 to exit BMPS and re-init
+ * QcSPI before we drive the line back high and start the SPI transaction. */
+#define QCC730_WAKE_LOW_MS       300
+
+/*
+ * qcc730_wakeup - ensure the QCC730 is AWAKE before a bus write.
  *
- * After a hard reset the QCC730 has already zeroed its shmem, but re-zeroing
- * from the host is idempotent and also covers a warm re-open. Zeroes both ring
- * headers and all slot.len fields, re-reads m2s.rd_idx into the local cache,
- * and clears the stale HOST_INT bits (which would otherwise fire a spurious
- * interrupt on the first doorbell). Returns 0 or -EIO.
+ * If pwr_state is ASLEEP the chip may be in BMPS/S2RAM, so pulse GPIO16
+ * (EXT_WAKEUP) LOW then HIGH to fire the 730's wake ISR, then wait a fixed
+ * settle delay. The host cannot observe the wake transition (firmware BMPS
+ * raises no host-visible event), so there is no completion wait — if the 730
+ * did not wake, the subsequent SPI write fails via the ring busy-poll and the
+ * caller's error path handles it.
  */
+int qcc730_wakeup(struct rcp_spi_master *priv)
+{
+	unsigned long flags;
+	bool awake;
+
+	/* Pre-connect / no power state tracked yet: assume reachable. */
+	if (!g_priv)
+		return 0;
+
+	/* No wake line bound (pre-wiring builds): assume always reachable. */
+	if (!priv->wakeup_gpio)
+		return 0;
+
+	/* Fast path: already awake, nothing to do. */
+	spin_lock_irqsave(&g_priv->pwr_lock, flags);
+	awake = (g_priv->pwr_state == RCP_PWR_AWAKE);
+	spin_unlock_irqrestore(&g_priv->pwr_lock, flags);
+	if (awake)
+		return 0;
+
+	/* We do NOT latch pwr_state=AWAKE here: while power save is enabled the 730
+	 * re-enters BMPS whenever it goes idle (no host-visible SLEEP event). So we
+	 * keep ASLEEP and pulse before every write until set_power_mgmt off. */
+	gpiod_set_value(priv->wakeup_gpio, 0);
+	msleep(QCC730_WAKE_LOW_MS);
+	gpiod_set_value(priv->wakeup_gpio, 1);
+
+	return 0;
+}
+
+/* No-arg wrapper for callers outside this file (e.g. cfg80211 set_power_mgmt)
+ * that have no handle to the static g_spi_master. */
+int rcp_bus_wakeup_qcc730(void)
+{
+	return qcc730_wakeup(&g_spi_master);
+}
+
+/* Bring the QcSPI ring to a known-clean state (spi_lock held). Zeroes both ring
+ * headers and all slot.len fields, re-reads m2s.rd_idx into the local cache, and
+ * clears stale HOST_INT bits (else a spurious interrupt fires on the first
+ * doorbell). Idempotent after a hard reset; also covers a warm re-open. */
 static int qcc730_ring_reset(struct rcp_spi_master *priv)
 {
 	static const u8 zeros[4] = {0, 0, 0, 0};
@@ -584,12 +587,10 @@ static enum rcp_bus_status spi_master_open(void)
 
 	mutex_lock(&priv->spi_lock);
 
-	/* Step 1: hard-reset the chip so it boots into a clean state (fresh
-	 * shmem + re-init s2m semaphore). This is what fixes the ring desync
-	 * when the host is reloaded while the QCC730 still has in-flight state
-	 * from the previous session (host can zero SRAM but cannot reset the
-	 * QCC730's software counters/semaphore - only a reboot does). Runs
-	 * before request_irq(), so no IRQ handler is attached during the pulse. */
+	/* Step 1: hard-reset for a clean boot (fresh shmem + re-init s2m
+	 * semaphore). Fixes ring desync on host reload while the QCC730 still has
+	 * in-flight state: the host can zero SRAM but only a reboot resets the
+	 * QCC730's own counters/semaphore. Runs before request_irq(). */
 	ret = qcc730_reset(priv);
 	if (ret) {
 		mutex_unlock(&priv->spi_lock);
@@ -643,10 +644,9 @@ static enum rcp_bus_status spi_master_write(uint8_t *tx, uint16_t len)
 
 	mutex_lock(&priv->spi_lock);
 
-	/* Check m2s ring capacity before writing.
-	 * Fast path: use cached rd_idx (no SPI transaction needed).
-	 * Slow path: if ring appears full, refresh rd_idx with one FREAD of the
-	 * 4-byte m2s ring header [wr_idx|rd_idx|_pad] from QCC730 SRAM. */
+	/* Check m2s ring capacity. Fast path: cached rd_idx (no SPI). Slow path:
+	 * if the ring looks full, refresh rd_idx with one FREAD of the 4-byte m2s
+	 * header [wr_idx|rd_idx|_pad] from QCC730 SRAM. */
 	{
 		u8 used = (wr - priv->m2s_rd_idx_cached + RCP_SHMEM_SLOTS)
 			  % RCP_SHMEM_SLOTS;
@@ -694,7 +694,7 @@ static enum rcp_bus_status spi_master_write(uint8_t *tx, uint16_t len)
 	}
 
 	/* Step 3: HOST_INT0 doorbell — notify QCC730 that slot is committed */
-	ret = qcspi_notify_int0(priv);
+	ret = qcspi_notify(priv, HOST_INT0_BIT);
 	if (ret) {
 		pr_err("rcp: notify_int0 failed: %d\n", ret);
 		mutex_unlock(&priv->spi_lock);
@@ -714,13 +714,10 @@ static uint16_t spi_master_get_rx_len(void)
 	uint16_t len;
 
 	mutex_lock(&priv->spi_lock);
-	/* Clear RX_DATA *before* reading slot.len, then re-arm if data is present.
-	 * Ordering matters: the GPIO IRQ handler sets RX_DATA on every s2m write.
-	 * If we read len first and clear afterwards, an IRQ that fires between the
-	 * read and the clear is lost — the event is wiped, the event loop sleeps,
-	 * and since QCC730 stops toggling once its ring fills, nothing ever wakes
-	 * the reader again (permanent s2m deadlock). Clearing first means any IRQ
-	 * after the read leaves RX_DATA set; reading data re-arms it ourselves. */
+	/* Clear RX_DATA BEFORE reading slot.len, then re-arm if data is present.
+	 * Ordering is critical: an IRQ firing between a len-first read and a later
+	 * clear would be wiped, and since QCC730 stops toggling once its ring fills,
+	 * nothing would ever wake the reader again (permanent s2m deadlock). */
 	rcp_events_clear(RCP_EVENT_RX_DATA);
 	len = __get_s2m_len(priv);
 	if (len != 0) {
@@ -745,11 +742,8 @@ static enum rcp_bus_status spi_master_read(uint8_t *rx, uint16_t len,
 
 	rd = priv->s2m_rd_idx;
 
-	/* Use caller-supplied len directly instead of re-reading slot.len from
-	 * SRAM.  get_rx_data() already called spi_master_get_rx_len() which
-	 * performed the FREAD to obtain the length; repeating it here wastes
-	 * 3 spi_sync() calls (~50 µs at 25 MHz SPI).
-	 * Validate: len==0 or len>BUF_SIZE fall through to the checks below. */
+	/* Use caller-supplied len (get_rx_len() already FREAD it); re-reading here
+	 * would waste 3 spi_sync() calls. len==0 / len>BUF_SIZE handled below. */
 	n = (u16)len;
 
 	if (n == 0) {
@@ -768,15 +762,13 @@ static enum rcp_bus_status spi_master_read(uint8_t *rx, uint16_t len,
 
 		pr_warn("rcp: s2m slot[%u] bad len=%u — skipping\n", rd, n);
 		qcspi_write(priv, SHMEM_S2M_SLOT_LEN_ADDR(rd), zero_len, 4);
-		qcspi_notify_int1(priv);
+		qcspi_notify(priv, HOST_INT1_BIT);
 		priv->s2m_rd_idx = (rd + 1) % RCP_SHMEM_SLOTS;
 		*nread = 0;
 		mutex_unlock(&priv->spi_lock);
 		return RCP_BUS_ERR_IO;
 	}
 
-	/* FREAD slot.buf directly into rx — no +4 offset trick needed since
-	 * qcspi_fread now requires non-NULL buf and copies before poll_busy. */
 	ret = qcspi_fread(priv, SHMEM_S2M_SLOT_BUF_ADDR(rd), rx, n);
 	if (ret) {
 		mutex_unlock(&priv->spi_lock);
@@ -784,11 +776,9 @@ static enum rcp_bus_status spi_master_read(uint8_t *rx, uint16_t len,
 	}
 	*nread = n;
 
-	/* Release the slot: zero slot[rd].len in SRAM. This is the single source
-	 * of truth the QCC730 producer polls to decide the slot is free — it must
-	 * be written before the INT1 doorbell so a producer woken by INT1 sees the
-	 * release. (Previously the QCC730 INT1 ISR cleared len by counting edges,
-	 * which desynced under edge coalescing at high rate.) */
+	/* Release the slot: zero slot[rd].len in SRAM — the source of truth the
+	 * QCC730 producer polls for a free slot. Must be written before the INT1
+	 * doorbell so a producer woken by INT1 sees the release. */
 	{
 		u8 zero_len[4] = {0};
 
@@ -800,7 +790,7 @@ static enum rcp_bus_status spi_master_read(uint8_t *rx, uint16_t len,
 	}
 
 	/* HOST_INT1 doorbell — wake a producer that may be blocked on a full ring. */
-	ret = qcspi_notify_int1(priv);
+	ret = qcspi_notify(priv, HOST_INT1_BIT);
 	if (ret) {
 		mutex_unlock(&priv->spi_lock);
 		return RCP_BUS_ERR_IO;
@@ -809,9 +799,8 @@ static enum rcp_bus_status spi_master_read(uint8_t *rx, uint16_t len,
 	priv->s2m_rd_idx = (rd + 1) % RCP_SHMEM_SLOTS;
 	atomic_set(&priv->rx_pending, 0);
 
-	/* Do not re-arm RX_DATA here.  spi_master_get_rx_len() re-arms it when
-	 * the next slot's len is non-zero, letting the event loop sleep until
-	 * the next GPIO IRQ instead of busy-polling. */
+	/* Do not re-arm RX_DATA here — get_rx_len() re-arms it on the next
+	 * non-zero slot.len, so the event loop sleeps until the next GPIO IRQ. */
 
 	mutex_unlock(&priv->spi_lock);
 	return RCP_BUS_OK;
@@ -836,6 +825,17 @@ int rcp_spi_master_probe(struct spi_device *spi, struct gpio_desc *irq_gpio,
 	priv->irq_gpio = irq_gpio;
 	priv->irq      = irq;
 	mutex_init(&priv->spi_lock);
+
+	/* GPIO16 -> QCC730 EXT_WAKEUP (A2F). Idles HIGH; wake is an active-LOW
+	 * pulse (see qcc730_wakeup). Optional: pre-wiring builds run without it
+	 * and qcc730_wakeup() then assumes the chip is reachable. */
+	priv->wakeup_gpio = devm_gpiod_get_optional(&spi->dev, "wakeup",
+						    GPIOD_OUT_HIGH);
+	if (IS_ERR(priv->wakeup_gpio)) {
+		pr_warn("rcp: no wakeup GPIO (%ld) - S2RAM wake disabled\n",
+			PTR_ERR(priv->wakeup_gpio));
+		priv->wakeup_gpio = NULL;
+	}
 
 	/* Register bus API here.  open() is called later by activate_bus()
 	 * from init_rcp(), after rcp_events_init() has run. */

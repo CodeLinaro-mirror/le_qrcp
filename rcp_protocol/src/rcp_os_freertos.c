@@ -34,7 +34,11 @@ bool rcp_os_sem_give(rcp_sem_t *sem)
 
 bool rcp_os_sem_take(rcp_sem_t *sem, uint32_t timeout)
 {
-	if (pdTRUE != xSemaphoreTake(sem->_sem, (timeout / portTICK_PERIOD_MS))) {
+	TickType_t ticks = (timeout == RCP_OS_WAIT_FOREVER)
+				   ? portMAX_DELAY
+				   : (timeout / portTICK_PERIOD_MS);
+
+	if (pdTRUE != xSemaphoreTake(sem->_sem, ticks)) {
 		return false;
 	}
 	return true;

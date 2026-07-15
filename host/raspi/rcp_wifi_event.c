@@ -25,10 +25,8 @@ static void rcp_connect_done(struct net_device *netdev, struct wiphy *wiphy,
 {
 	u8 bssid[ETH_ALEN];
 
-	/* cfg80211_connect_bss() consumes our bss reference (it forwards to
-	 * cfg80211_connect_done(), which takes ownership: on success it moves
-	 * the ref into the queued event, on failure it puts it). So copy the
-	 * BSSID out first — bss must not be dereferenced or put afterwards. */
+	/* cfg80211_connect_bss() consumes our bss ref, so copy the BSSID out
+	 * first — bss must not be dereferenced or put afterwards. */
 	ether_addr_copy(bssid, bss->bssid);
 	cfg80211_connect_bss(netdev, bssid, bss, NULL, 0, NULL, 0,
 			     WLAN_STATUS_SUCCESS, GFP_KERNEL,
@@ -38,12 +36,10 @@ static void rcp_connect_done(struct net_device *netdev, struct wiphy *wiphy,
 }
 
 /* Deferred connect-failure report. Runs RCP_CONNECT_FAIL_GRACE_MS after a
- * firmware CONN_FAIL if no CONN_SUCCESS cancelled it — i.e. a genuine failure.
- * Report only if the attempt is still pending AND still the same generation
- * this work was armed for: a success, a new connect, or a disconnect bumps
- * connect_gen and/or clears connect_pending, invalidating a stale work item
- * that may already have been running. cfg80211_connect_result() does its own
- * internal locking, so no wiphy_lock is needed (matches the kthread path). */
+ * firmware CONN_FAIL if no CONN_SUCCESS cancelled it. Reports only if the
+ * attempt is still pending AND still the same generation this work was armed
+ * for — a success/new-connect/disconnect bumps connect_gen or clears
+ * connect_pending, invalidating a stale (possibly already-running) work item. */
 void rcp_connect_fail_work(struct work_struct *work)
 {
 	struct rcp_priv *priv = container_of(to_delayed_work(work),
@@ -75,11 +71,9 @@ void rcp_wifi_event_to_cfg80211(struct rcp_priv *priv, int evt, void *data)
 		unsigned long flags;
 		bool success = conn && conn->status == 0;
 
-		/* Firmware fail-then-success quirk: while a connect is pending, a
-		 * CONN_FAIL is deferred rather than reported to cfg80211 — reporting
-		 * it would clear cfg80211's ssid_len and break a subsequent success
-		 * (which can never disconnect afterwards). Defer the failure by the
-		 * grace window; a success arriving first cancels it. */
+		/* Firmware fail-then-success quirk: defer a CONN_FAIL while a connect
+		 * is pending — reporting it clears cfg80211's ssid_len and breaks a
+		 * later success. A success within the grace window cancels it. */
 		if (!success) {
 			bool pending;
 
@@ -101,8 +95,7 @@ void rcp_wifi_event_to_cfg80211(struct rcp_priv *priv, int evt, void *data)
 		}
 
 		/* Success: settle the connect. Bump the generation and clear the
-		 * pending guard so any already-armed (or already-running) deferred
-		 * failure is invalidated, then cancel the timer. */
+		 * pending guard to invalidate any deferred failure, then cancel it. */
 		spin_lock_irqsave(&priv->lock, flags);
 		priv->connect_pending = false;
 		priv->connect_gen++;
@@ -259,10 +252,9 @@ void rcp_wifi_event_to_cfg80211(struct rcp_priv *priv, int evt, void *data)
 	}
 	case RCP_WIFI_AP_ENABLED:
 		pr_info("rcp: AP enabled\n");
-		/* The SoftAP is now up, so firmware has assigned the SAP iface its
-		 * MAC. Re-query L2_INTERFACES to learn it (the sync at MGMT bring-up
-		 * ran before AP enable, when the SAP MAC was still all-zero); the
-		 * RESP handler aligns the netdev MAC to it. */
+		/* SoftAP is up: firmware has now assigned the SAP MAC (still all-zero
+		 * at MGMT bring-up). Re-query L2_INTERFACES; the RESP handler aligns
+		 * the netdev MAC to it. */
 		rcp_wifi_get_l2_interfaces(RCP_NET_IF_TYPE_WIFI, 0);
 		break;
 	case RCP_WIFI_AP_DISABLED:
@@ -271,11 +263,9 @@ void rcp_wifi_event_to_cfg80211(struct rcp_priv *priv, int evt, void *data)
 	case RCP_WIFI_AP_STA_CONNECTED: {
 		const struct rcp_wifi_evt_ap_sta *sta = data;
 		struct station_info sinfo = { 0 };
-		/* WPA2-PSK RSN IE (CCMP group+pairwise, PSK AKM). The firmware
-		 * AP STA-connected event carries no (Re)Assoc IEs, so on a WPA2
-		 * SoftAP hostapd sees "No WPA/RSN IE from STA" and immediately
-		 * kicks it. Report a matching RSN IE via assoc_req_ies so the
-		 * offloaded (already-authenticated) STA is accepted. */
+		/* The firmware AP STA-connected event carries no (Re)Assoc IEs, so
+		 * WPA2 hostapd sees "No WPA/RSN IE from STA" and kicks it. Report a
+		 * matching RSN IE via assoc_req_ies so the STA is accepted. */
 		static const u8 rsn_wpa2_psk[] = {
 			0x30, 0x14,             /* RSN IE, len=20 */
 			0x01, 0x00,             /* version 1 */
@@ -302,13 +292,9 @@ void rcp_wifi_event_to_cfg80211(struct rcp_priv *priv, int evt, void *data)
 		cfg80211_new_sta(netdev, sta->sta_mac_address, &sinfo,
 				 GFP_KERNEL);
 
-		/* The firmware is the AP SME/authenticator: by the time it raises
-		 * AP_STA_CONNECTED the STA is fully associated and (for WPA2) has
-		 * completed the 4-way handshake — its controlled port is open.
-		 * hostapd does not run the handshake here, so it would leave the STA
-		 * at [AUTH][ASSOC]. Emit NL80211_CMD_PORT_AUTHORIZED for the STA
-		 * (cfg80211_port_authorized takes the associated STA's MAC in AP mode)
-		 * so hostapd's EVENT_PORT_AUTHORIZED marks it [AUTHORIZED]. */
+		/* Firmware is the AP authenticator: the STA's port is already open by
+		 * AP_STA_CONNECTED, but hostapd would leave it at [AUTH][ASSOC]. Emit
+		 * PORT_AUTHORIZED (STA MAC in AP mode) so hostapd marks it [AUTHORIZED]. */
 		cfg80211_port_authorized(netdev, sta->sta_mac_address, NULL, 0,
 					 GFP_KERNEL);
 		break;
@@ -424,12 +410,9 @@ void rcp_wifi_event_to_cfg80211(struct rcp_priv *priv, int evt, void *data)
 		if (!ifs || !ifs->count)
 			break;
 
-		/* QCC730 reports both the STA (index 1) and SAP (index 2) MACs.
-		 * The netdev MAC must match the iface the frames egress on, else the
-		 * downlink source MAC is wrong and clients drop the replies. Align it
-		 * to the SAP MAC while in AP mode, to the STA MAC otherwise. The SAP
-		 * MAC is only valid once the SoftAP is up, so this RESP is also
-		 * re-requested from the AP_ENABLED event. */
+		/* QCC730 reports the STA (index 1) and SAP (index 2) MACs. Align the
+		 * netdev MAC to the egress iface (SAP in AP mode, STA otherwise), else
+		 * the downlink source MAC is wrong and clients drop the replies. */
 		for (i = 0; i < ifs->count; i++) {
 			if (ifs->net_ifs[i].net_if_type != RCP_NET_IF_TYPE_WIFI)
 				continue;

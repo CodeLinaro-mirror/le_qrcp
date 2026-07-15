@@ -194,6 +194,41 @@ static int rcp_vendor_set_cts_to_self(struct wiphy *wiphy, struct wireless_dev *
 			      sizeof(struct rcp_vc_cts_to_self));
 }
 
+static int rcp_vendor_set_ignore_bc_mc(struct wiphy *wiphy, struct wireless_dev *wdev,
+				       const void *data, int data_len)
+{
+	return vendor_set_raw(QCC730_SUBCMD_SET_IGNORE_BC_MC_IN_BMPS, data, data_len,
+			      sizeof(struct rcp_vc_bmps_flag));
+}
+
+static int rcp_vendor_set_power_opt(struct wiphy *wiphy, struct wireless_dev *wdev,
+				    const void *data, int data_len)
+{
+	return vendor_set_raw(QCC730_SUBCMD_SET_POWER_OPT_IN_BMPS, data, data_len,
+			      sizeof(struct rcp_vc_bmps_flag));
+}
+
+static int rcp_vendor_set_compress_qos_null(struct wiphy *wiphy, struct wireless_dev *wdev,
+					    const void *data, int data_len)
+{
+	return vendor_set_raw(QCC730_SUBCMD_SET_COMPRESS_QOS_NULL_IN_BMPS, data, data_len,
+			      sizeof(struct rcp_vc_bmps_flag));
+}
+
+static int rcp_vendor_set_rx_filter(struct wiphy *wiphy, struct wireless_dev *wdev,
+				    const void *data, int data_len)
+{
+	return vendor_set_raw(QCC730_SUBCMD_SET_RX_FILTER_IN_BMPS, data, data_len,
+			      sizeof(struct rcp_vc_bmps_flag));
+}
+
+static int rcp_vendor_set_listen_interval(struct wiphy *wiphy, struct wireless_dev *wdev,
+					  const void *data, int data_len)
+{
+	return vendor_set_raw(QCC730_SUBCMD_SET_LISTEN_INTERVAL, data, data_len,
+			      sizeof(struct rcp_vc_listen_interval));
+}
+
 static int rcp_vendor_unit_test(struct wiphy *wiphy, struct wireless_dev *wdev,
 				const void *data, int data_len)
 {
@@ -246,6 +281,16 @@ const struct wiphy_vendor_command rcp_vendor_commands[] = {
 	VC_ENTRY(QCC730_SUBCMD_GET_BMISS_THRESHOLD, rcp_vendor_get_bmiss_threshold,
 		 WIPHY_VENDOR_CMD_NEED_RUNNING),
 	VC_ENTRY(QCC730_SUBCMD_SET_CTS_TO_SELF, rcp_vendor_set_cts_to_self,
+		 WIPHY_VENDOR_CMD_NEED_RUNNING),
+	VC_ENTRY(QCC730_SUBCMD_SET_IGNORE_BC_MC_IN_BMPS, rcp_vendor_set_ignore_bc_mc,
+		 WIPHY_VENDOR_CMD_NEED_RUNNING),
+	VC_ENTRY(QCC730_SUBCMD_SET_POWER_OPT_IN_BMPS, rcp_vendor_set_power_opt,
+		 WIPHY_VENDOR_CMD_NEED_RUNNING),
+	VC_ENTRY(QCC730_SUBCMD_SET_COMPRESS_QOS_NULL_IN_BMPS, rcp_vendor_set_compress_qos_null,
+		 WIPHY_VENDOR_CMD_NEED_RUNNING),
+	VC_ENTRY(QCC730_SUBCMD_SET_RX_FILTER_IN_BMPS, rcp_vendor_set_rx_filter,
+		 WIPHY_VENDOR_CMD_NEED_RUNNING),
+	VC_ENTRY(QCC730_SUBCMD_SET_LISTEN_INTERVAL, rcp_vendor_set_listen_interval,
 		 WIPHY_VENDOR_CMD_NEED_RUNNING),
 	VC_ENTRY(QCC730_SUBCMD_UNIT_TEST, rcp_vendor_unit_test,
 		 WIPHY_VENDOR_CMD_NEED_RUNNING),

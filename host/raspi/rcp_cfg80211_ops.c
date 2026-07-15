@@ -9,6 +9,7 @@
 #include <net/cfg80211.h>
 
 #include "rcp_wifi_cfg80211.h"
+#include "rcp_bus_spi_master_linux_qcc730.h"
 #include <wifi/rcp_wifi_mgmt.h>
 #include <rcp_vendor_cmds.h>
 
@@ -87,10 +88,8 @@ static int rcp_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 	 *   kernel puts it in sme->crypto.sae_pwd. */
 	if (sme->auth_type == NL80211_AUTHTYPE_SAE) {
 		req->sec_type = RCP_WIFI_SEC_TYPE_SAE;
-		/* WPA3-SAE mandates PMF/MFP. The firmware leaves MFP disabled when
-		 * req->mfp==0 (RCP_WIFI_MFP_DISABLE), so it associates without
-		 * management-frame protection; the AP then rejects and the firmware
-		 * silently times out. Force MFP=REQUIRED for SAE. */
+		/* WPA3-SAE mandates PMF/MFP; without it the AP rejects and the
+		 * firmware silently times out. Force MFP=REQUIRED for SAE. */
 		req->mfp = RCP_WIFI_MFP_REQUIRED;
 		if (sme->crypto.sae_pwd && sme->crypto.sae_pwd_len) {
 			req->sae_password_len = min_t(size_t,
@@ -119,8 +118,8 @@ static int rcp_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 		req->sec_type = RCP_WIFI_SEC_TYPE_NONE;
 	}
 
-	/* Cache BSS ref so connect_result can pass a valid BSS to cfg80211.
-	 * Kernel 6.12 requires a non-NULL BSS for WLAN_STATUS_SUCCESS. */
+	/* Cache BSS ref so connect_result can pass a valid BSS to cfg80211
+	 * (kernel 6.12 requires a non-NULL BSS for WLAN_STATUS_SUCCESS). */
 	{
 		struct rcp_priv *priv = wiphy_priv(wiphy);
 		unsigned long flags;
@@ -142,10 +141,9 @@ static int rcp_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 						     IEEE80211_PRIVACY_ANY);
 	}
 
-	/* Arm the fail-then-success guard: from now until a connect result is
-	 * completed, a firmware CONN_FAIL is deferred rather than reported. Bump
-	 * the generation so any deferred failure from a previous attempt (armed
-	 * or already running) is invalidated, then cancel its timer. */
+	/* Arm the fail-then-success guard: until a connect result completes, a
+	 * firmware CONN_FAIL is deferred. Bump the generation to invalidate any
+	 * deferred failure from a previous attempt, then cancel its timer. */
 	{
 		struct rcp_priv *priv = wiphy_priv(wiphy);
 		unsigned long flags;
@@ -318,11 +316,8 @@ static void rcp_fill_station_info(struct station_info *sinfo)
 			g_priv->iface_status.tx_bitrate_kbps / 100;
 	}
 
-	/* TX/RX packet & byte counts come from the netdev stats the data path
-	 * already maintains (rcp_netdev_ops.c) — these are the frames that
-	 * actually crossed QcSPI. Serves wpa_cli pktcnt_poll and iw station
-	 * dump. tx_failed is left unset: the host has no over-the-air TX-failure
-	 * count (only the firmware does). */
+	/* TX/RX counts from the netdev stats the data path maintains. tx_failed is
+	 * left unset — the host has no over-the-air TX-failure count. */
 	sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_PACKETS) |
 			 BIT_ULL(NL80211_STA_INFO_RX_PACKETS) |
 			 BIT_ULL(NL80211_STA_INFO_TX_BYTES64) |
@@ -420,15 +415,9 @@ void rcp_reg_notifier(struct wiphy *wiphy, struct regulatory_request *request)
 	rcp_wifi_set_reg_domain(&reg_domain);
 }
 
-/* Standard nl80211 TX power ops — carried over the WIFI_MGMT proto protocol.
- * QCC730 firmware sets an absolute dBm value; it has no automatic mode.
- *
- * The firmware TX-power policy maps onto the nl80211 setting (policy encoding
- * is chip-specific — read from priv->chip_caps):
- *   LIMITED -> SAFE:    obey regulatory/CTL/target limits; firmware rejects
- *                       a request above those limits.
- *   FIXED   -> FREERUN: force the value into the rate table without a
- *                       regulatory check (test/forced operation). */
+/* nl80211 TX power over WIFI_MGMT. Firmware sets an absolute dBm; no auto mode.
+ * Policy (chip-specific encoding from chip_caps): FIXED -> FREERUN (force value,
+ * no regulatory check), else SAFE (obey regulatory/CTL/target limits). */
 static int rcp_cfg80211_set_tx_power(struct wiphy *wiphy,
 				     struct wireless_dev *wdev,
 				     enum nl80211_tx_power_setting type, int mbm)
@@ -531,6 +520,38 @@ static int rcp_cfg80211_get_channel(struct wiphy *wiphy,
 	return 0;
 }
 
+/* iw dev <dev> set power_save on/off — toggle BMPS. `timeout` (ms) is the BMPS
+ * idle timeout; -1 = firmware default (set_ps_config clamps negatives). */
+static int rcp_cfg80211_set_power_mgmt(struct wiphy *wiphy, struct net_device *dev,
+				       bool enabled, int timeout)
+{
+	struct rcp_priv *priv = wiphy_priv(wiphy);
+	unsigned long flags;
+	enum rcp_wifi_status st;
+
+	if (!priv->mgmt_ready)
+		return -EAGAIN;
+
+	pr_info("rcp: set_power_mgmt enabled=%d timeout=%d\n", enabled, timeout);
+
+	/* Wake the 730 before the PS command: if power save was on, it may be in
+	 * BMPS long-sleep and the write would hit an unresponsive QcSPI.
+	 * qcc730_wakeup() no-ops when already AWAKE. */
+	rcp_bus_wakeup_qcc730();
+
+	st = rcp_wifi_set_ps_config(0, enabled, timeout);
+	if (st != RCP_WIFI_OK)
+		return -EIO;
+
+	/* Track power state for the next wakeup decision: enable -> ASLEEP
+	 * (730 enters BMPS), disable -> AWAKE. */
+	spin_lock_irqsave(&priv->pwr_lock, flags);
+	priv->pwr_state = enabled ? RCP_PWR_ASLEEP : RCP_PWR_AWAKE;
+	spin_unlock_irqrestore(&priv->pwr_lock, flags);
+
+	return 0;
+}
+
 struct cfg80211_ops rcp_cfg80211_ops = {
 	.scan            = rcp_cfg80211_scan,
 	.change_virtual_intf = rcp_cfg80211_change_iface,
@@ -549,4 +570,5 @@ struct cfg80211_ops rcp_cfg80211_ops = {
 	.get_tx_power    = rcp_cfg80211_get_tx_power,
 	.set_wiphy_params = rcp_cfg80211_set_wiphy_params,
 	.get_channel     = rcp_cfg80211_get_channel,
+	.set_power_mgmt  = rcp_cfg80211_set_power_mgmt,
 };

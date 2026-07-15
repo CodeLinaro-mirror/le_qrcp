@@ -14,6 +14,7 @@
  *   SPI0_CE0  (GPIO8)  -> QCC730 GPIO1 (CS, active low)
  *   GPIO21             <- QCC730 GPIO8 (IRQ, active high, rising edge)
  *   GPIO20             -> QCC730 reset (active low: low=reset, high=run)
+ *   GPIO16             -> QCC730 EXT_WAKEUP (A2F wake, active high pulse)
  */
 
 /dts-v1/;
@@ -44,6 +45,8 @@
 				 * flag 1 == GPIO_ACTIVE_LOW (literal, avoids the
 				 * dt-bindings include so a plain `dtc` build works). */
 				reset-gpios = <&gpio 20 1>;
+				/* GPIO16 -> QCC730 EXT_WAKEUP (A2F), active high. */
+				wakeup-gpios = <&gpio 16 0>;
 			};
 		};
 	};
@@ -59,6 +62,12 @@
 
 			qcc730_reset_pins: qcc730_reset_pins {
 				brcm,pins = <20>;
+				brcm,function = <1>;  /* output */
+				brcm,pull = <0>;      /* no pull */
+			};
+
+			qcc730_wakeup_pins: qcc730_wakeup_pins {
+				brcm,pins = <16>;
 				brcm,function = <1>;  /* output */
 				brcm,pull = <0>;      /* no pull */
 			};
